@@ -1,0 +1,24 @@
+{
+  "name": "@chassis/telemetry-protocol",
+  "private": true,
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "generate": "tsx scripts/generate.ts",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "~4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "^26.0.0",
+    "json-schema-to-typescript": "16.0.0",
+    "tsx": "~4.23.15",
+    "typescript": "~6.0",
+    "vitest": "~5.1"
+  }
+}
