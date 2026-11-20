@@ -1,0 +1,900 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServerFrame",
+  "type": "object",
+  "properties": {
+    "seq": {
+      "description": "Per-connection frame sequence number, starting at one.",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 1
+    },
+    "ts_ms": {
+      "description": "Sender wall-clock time in Unix epoch milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0
+    },
+    "v": {
+      "description": "Protocol major version number.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        },
+        "daemon_version": {
+          "type": "string"
+        },
+        "host": {
+          "$ref": "#/$defs/HostIdentity"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "sample_interval_ms": {
+          "description": "Sampling interval in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "hello"
+        }
+      },
+      "required": [
+        "type",
+        "daemon_version",
+        "protocol",
+        "sample_interval_ms",
+        "host",
+        "capabilities"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "$ref": "#/$defs/CpuSample"
+        },
+        "disk": {
+          "$ref": "#/$defs/DiskSample"
+        },
+        "gpus": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GpuSample"
+          }
+        },
+        "memory": {
+          "$ref": "#/$defs/MemorySample"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkSample"
+        },
+        "top_processes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProcessSample"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "host.sample"
+        },
+        "uptime_s": {
+          "description": "Host uptime in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "cpu",
+        "memory",
+        "network",
+        "disk",
+        "gpus",
+        "top_processes",
+        "uptime_s"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentSession"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "agents.snapshot"
+        }
+      },
+      "required": [
+        "type",
+        "sessions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/AgentSession"
+        },
+        "type": {
+          "type": "string",
+          "const": "agent.upsert"
+        }
+      },
+      "required": [
+        "type",
+        "session"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "agent.remove"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "message"
+      ]
+    }
+  ],
+  "required": [
+    "v",
+    "ts_ms",
+    "seq"
+  ],
+  "$defs": {
+    "AgentCapability": {
+      "type": "object",
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/AvailabilityStatus"
+        },
+        "kind": {
+          "$ref": "#/$defs/AgentKind"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "availability"
+      ]
+    },
+    "AgentKind": {
+      "type": "string",
+      "enum": [
+        "claude_code",
+        "opencode",
+        "codex"
+      ]
+    },
+    "AgentSession": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cost"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AgentKind"
+        },
+        "last_activity_ms": {
+          "description": "Last activity in Unix epoch milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "native_id": {
+          "type": "string"
+        },
+        "output_tokens_per_s": {
+          "description": "Output rate in tokens per second.",
+          "type": "number",
+          "format": "double"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "description": "OS process identifier, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rate_limits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RateLimit"
+          }
+        },
+        "state": {
+          "$ref": "#/$defs/AgentState"
+        },
+        "state_since_ms": {
+          "description": "Start of the current state in Unix epoch milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "state_source": {
+          "$ref": "#/$defs/StateSource"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokens": {
+          "$ref": "#/$defs/TokenCounts"
+        },
+        "workspace_dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "native_id",
+        "workspace_dir",
+        "state",
+        "state_source",
+        "state_since_ms",
+        "last_activity_ms",
+        "tokens",
+        "rate_limits",
+        "output_tokens_per_s"
+      ]
+    },
+    "AgentState": {
+      "type": "string",
+      "enum": [
+        "thinking",
+        "tool_use",
+        "working",
+        "awaiting_approval",
+        "idle",
+        "unknown"
+      ]
+    },
+    "Availability": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/AvailabilityStatus"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "AvailabilityStatus": {
+      "type": "string",
+      "enum": [
+        "available",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentCapability"
+          }
+        },
+        "metrics": {
+          "$ref": "#/$defs/MetricCapabilities"
+        }
+      },
+      "required": [
+        "metrics",
+        "agents"
+      ]
+    },
+    "ContextUsage": {
+      "type": "object",
+      "properties": {
+        "used_tokens": {
+          "description": "Context usage in tokens.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "window_tokens": {
+          "description": "Context window capacity in tokens.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      }
+    },
+    "Cost": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "price_table": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string",
+              "const": "reported"
+            },
+            "usd": {
+              "description": "Cost in US dollars.",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "source",
+            "usd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "price_table": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "usd": {
+              "description": "Cost in US dollars.",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "source",
+            "usd",
+            "price_table"
+          ]
+        }
+      ]
+    },
+    "CpuSample": {
+      "type": "object",
+      "properties": {
+        "per_core_pct": {
+          "description": "Usage of each CPU core as a percentage (0–100).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double",
+            "maximum": 100,
+            "minimum": 0
+          }
+        },
+        "usage_pct": {
+          "description": "Overall CPU usage as a percentage (0–100).",
+          "type": "number",
+          "format": "double",
+          "maximum": 100,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "usage_pct",
+        "per_core_pct"
+      ]
+    },
+    "DiskSample": {
+      "type": "object",
+      "properties": {
+        "read_bytes_per_s": {
+          "description": "Disk read throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        },
+        "write_bytes_per_s": {
+          "description": "Disk write throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "read_bytes_per_s",
+        "write_bytes_per_s"
+      ]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "auth_failed",
+        "protocol_mismatch",
+        "internal"
+      ]
+    },
+    "GpuSample": {
+      "type": "object",
+      "properties": {
+        "freq_mhz": {
+          "description": "GPU frequency in megahertz.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "power_w": {
+          "description": "GPU power in watts.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "temp_c": {
+          "description": "GPU temperature in degrees Celsius.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "usage_pct": {
+          "description": "GPU usage as a percentage (0–100).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "maximum": 100,
+          "minimum": 0
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vram_total_bytes": {
+          "description": "Total video memory in bytes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "vram_used_bytes": {
+          "description": "Used video memory in bytes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "HostIdentity": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "cpu_brand": {
+          "type": "string"
+        },
+        "cpu_cores": {
+          "description": "Number of CPU cores.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_total_bytes": {
+          "description": "Total host memory in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "os_name": {
+          "type": "string"
+        },
+        "os_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "hostname",
+        "os_name",
+        "os_version",
+        "arch",
+        "cpu_brand",
+        "cpu_cores",
+        "memory_total_bytes"
+      ]
+    },
+    "MemorySample": {
+      "type": "object",
+      "properties": {
+        "available_bytes": {
+          "description": "Available memory in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "swap_total_bytes": {
+          "description": "Total swap in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "swap_used_bytes": {
+          "description": "Used swap in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "total_bytes": {
+          "description": "Total memory in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "used_bytes": {
+          "description": "Used memory in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "used_bytes",
+        "available_bytes",
+        "total_bytes",
+        "swap_used_bytes",
+        "swap_total_bytes"
+      ]
+    },
+    "MetricCapabilities": {
+      "type": "object",
+      "properties": {
+        "gpu_freq": {
+          "$ref": "#/$defs/Availability"
+        },
+        "gpu_memory": {
+          "$ref": "#/$defs/Availability"
+        },
+        "gpu_power": {
+          "$ref": "#/$defs/Availability"
+        },
+        "gpu_usage": {
+          "$ref": "#/$defs/Availability"
+        },
+        "temperatures": {
+          "$ref": "#/$defs/Availability"
+        }
+      },
+      "required": [
+        "gpu_usage",
+        "gpu_memory",
+        "gpu_power",
+        "gpu_freq",
+        "temperatures"
+      ]
+    },
+    "NetworkInterfaceSample": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "rx_bytes_per_s": {
+          "description": "Interface receive throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        },
+        "tx_bytes_per_s": {
+          "description": "Interface transmit throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "rx_bytes_per_s",
+        "tx_bytes_per_s"
+      ]
+    },
+    "NetworkSample": {
+      "type": "object",
+      "properties": {
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NetworkInterfaceSample"
+          }
+        },
+        "rx_bytes_per_s": {
+          "description": "Aggregate receive throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        },
+        "tx_bytes_per_s": {
+          "description": "Aggregate transmit throughput in bytes per second.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "rx_bytes_per_s",
+        "tx_bytes_per_s",
+        "interfaces"
+      ]
+    },
+    "ProcessSample": {
+      "type": "object",
+      "properties": {
+        "cpu_pct": {
+          "description": "Process CPU usage as a percentage (0–100).",
+          "type": "number",
+          "format": "double",
+          "maximum": 100,
+          "minimum": 0
+        },
+        "memory_bytes": {
+          "description": "Process memory usage in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "pid": {
+          "description": "OS process identifier.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "name",
+        "cpu_pct",
+        "memory_bytes"
+      ]
+    },
+    "ProtocolVersion": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "description": "Protocol major version number.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "minor": {
+          "description": "Protocol minor version number.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ]
+    },
+    "RateLimit": {
+      "type": "object",
+      "properties": {
+        "resets_at_ms": {
+          "description": "Scheduled reset in Unix epoch milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "used_pct": {
+          "description": "Used share of the rate limit as a percentage (0–100).",
+          "type": "number",
+          "format": "double",
+          "maximum": 100,
+          "minimum": 0
+        },
+        "window_minutes": {
+          "description": "Length of the rate-limit window in minutes.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "window_minutes",
+        "used_pct"
+      ]
+    },
+    "StateSource": {
+      "type": "string",
+      "enum": [
+        "reported",
+        "inferred"
+      ]
+    },
+    "TokenCounts": {
+      "type": "object",
+      "properties": {
+        "cache_read_tokens": {
+          "description": "Cumulative cache-read token count.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "description": "Cumulative cache-write token count.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "input_tokens": {
+          "description": "Cumulative input token count.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "output_tokens": {
+          "description": "Cumulative output token count.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "description": "Cumulative reasoning token count, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
+      ]
+    }
+  }
+}

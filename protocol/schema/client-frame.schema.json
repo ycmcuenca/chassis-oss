@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientFrame",
+  "type": "object",
+  "properties": {
+    "ts_ms": {
+      "description": "Sender wall-clock time in Unix epoch milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0
+    },
+    "v": {
+      "description": "Protocol major version number.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "client": {
+          "$ref": "#/$defs/ClientIdentity"
+        },
+        "protocol_major": {
+          "description": "Protocol major version number spoken by the client.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "token": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "client.hello"
+        }
+      },
+      "required": [
+        "type",
+        "protocol_major",
+        "token",
+        "client"
+      ]
+    }
+  ],
+  "required": [
+    "v",
+    "ts_ms"
+  ],
+  "$defs": {
+    "ClientIdentity": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    }
+  }
+}
