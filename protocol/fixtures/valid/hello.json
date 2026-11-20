@@ -1,0 +1,57 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "seq": 1,
+  "type": "hello",
+  "daemon_version": "0.1.0",
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "sample_interval_ms": 1000,
+  "host": {
+    "id": "host-01",
+    "hostname": "workstation",
+    "os_name": "Linux",
+    "os_version": "6.12",
+    "arch": "x86_64",
+    "cpu_brand": "AMD Ryzen 5 5600",
+    "cpu_cores": 6,
+    "memory_total_bytes": 34359738368
+  },
+  "capabilities": {
+    "metrics": {
+      "gpu_usage": {
+        "status": "available"
+      },
+      "gpu_memory": {
+        "status": "available"
+      },
+      "gpu_freq": {
+        "status": "available"
+      },
+      "temperatures": {
+        "status": "unavailable",
+        "reason": "Temperature sensor not exposed"
+      },
+      "gpu_power": {
+        "status": "unavailable",
+        "reason": "Power sensor not exposed"
+      }
+    },
+    "agents": [
+      {
+        "kind": "claude_code",
+        "availability": "available"
+      },
+      {
+        "kind": "opencode",
+        "availability": "available"
+      },
+      {
+        "kind": "codex",
+        "availability": "available"
+      }
+    ]
+  }
+}

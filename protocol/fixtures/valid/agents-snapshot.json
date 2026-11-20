@@ -1,0 +1,59 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "seq": 3,
+  "type": "agents.snapshot",
+  "sessions": [
+    {
+      "id": "opencode:open-01",
+      "kind": "opencode",
+      "native_id": "open-01",
+      "workspace_dir": "/home/dev/workspace",
+      "state": "thinking",
+      "state_source": "reported",
+      "state_since_ms": 1794999995000,
+      "last_activity_ms": 1794999999500,
+      "tokens": {
+        "input_tokens": 3840,
+        "output_tokens": 640,
+        "cache_read_tokens": 1024,
+        "cache_write_tokens": 512,
+        "reasoning_tokens": 256
+      },
+      "rate_limits": [],
+      "output_tokens_per_s": 24.5,
+      "cost": {
+        "usd": 0.018,
+        "source": "reported"
+      }
+    },
+    {
+      "id": "codex:codex-01",
+      "kind": "codex",
+      "native_id": "codex-01",
+      "workspace_dir": "/home/dev/workspace",
+      "state": "working",
+      "state_source": "inferred",
+      "state_since_ms": 1794999995000,
+      "last_activity_ms": 1794999999500,
+      "tokens": {
+        "input_tokens": 3840,
+        "output_tokens": 640,
+        "cache_read_tokens": 1024,
+        "cache_write_tokens": 512
+      },
+      "rate_limits": [
+        {
+          "window_minutes": 300,
+          "used_pct": 21.5,
+          "resets_at_ms": 1795005400000
+        }
+      ],
+      "output_tokens_per_s": 24.5,
+      "context": {
+        "used_tokens": 8192,
+        "window_tokens": 262144
+      }
+    }
+  ]
+}

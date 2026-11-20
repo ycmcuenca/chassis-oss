@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "type": "client.hello",
+  "protocol_major": 1,
+  "client": {
+    "name": "Chassis Desktop",
+    "version": "0.1.0"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "seq": 4,
+  "type": "agent.upsert",
+  "session": {
+    "id": "claude_code:claude-01",
+    "kind": "cursor",
+    "native_id": "claude-01",
+    "workspace_dir": "/home/dev/workspace",
+    "state": "working",
+    "state_source": "inferred",
+    "state_since_ms": 1794999995000,
+    "last_activity_ms": 1794999999500,
+    "tokens": {
+      "input_tokens": 3840,
+      "output_tokens": 640,
+      "cache_read_tokens": 1024,
+      "cache_write_tokens": 512
+    },
+    "rate_limits": [],
+    "output_tokens_per_s": 24.5,
+    "title": null,
+    "cost": {
+      "usd": 0.026,
+      "source": "estimated",
+      "price_table": "2026-11"
+    }
+  }
+}
