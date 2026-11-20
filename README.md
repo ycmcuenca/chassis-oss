@@ -1,7 +1,8 @@
 # Chassis OSS
 
 `chassis-daemon` is the host daemon for Chassis telemetry. It currently exposes
-its version; the telemetry protocol is not yet implemented.
+its version; it does not yet serve telemetry. See the
+[telemetry protocol reference](protocol/README.md) for the wire format and tools.
 
 Run `just check` from this directory to format-check, lint, and test the workspace.
 
