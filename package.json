@@ -1,0 +1,9 @@
+{
+  "name": "chassis-oss",
+  "private": true,
+  "packageManager": "pnpm@10.31.0",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=26"
+  }
+}
