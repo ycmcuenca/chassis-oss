@@ -15,7 +15,8 @@ fn server(body: Value) -> Value {
 fn client_hello() -> Value {
     json!({
         "v": 1, "ts_ms": 123, "type": "client.hello",
-        "protocol_major": 1, "token": "test-token", "client": {"name": "test", "version": "1"}
+        "protocol_major": 1, "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "client": {"name": "test", "version": "1"}
     })
 }
 
@@ -112,6 +113,7 @@ fn parse_lenient_distinguishes_frame_unknown_and_invalid() {
                 "unknown"
             }
             Err(ParseError::Invalid { .. }) => "invalid",
+            Err(ParseError::ProtocolMismatch) => "mismatch",
         };
         assert_eq!(actual, expected, "{wire}");
     }
@@ -133,9 +135,9 @@ fn unknown_fields_are_ignored_and_optional_values_stay_absent() {
 }
 
 #[test]
-fn client_parse_rejects_missing_token_and_unknown_type() {
+fn client_parse_rejects_missing_nonce_and_unknown_type() {
     let mut wire = client_hello();
-    wire.as_object_mut().unwrap().remove("token");
+    wire.as_object_mut().unwrap().remove("nonce");
     assert!(matches!(
         ClientFrame::parse(&wire.to_string()),
         Err(ParseError::Invalid { .. })

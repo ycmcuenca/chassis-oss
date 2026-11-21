@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "type": "auth.challenge",
+  "seq": 1,
+  "nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "proof": "_v_YCZmKH-28fXkD2qhTTpVdyjR3zICetmFrN8NA8S4"
+}

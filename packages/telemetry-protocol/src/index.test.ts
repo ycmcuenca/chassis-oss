@@ -44,9 +44,9 @@ test("round-trips client frames and rejects invalid input when encoding", () => 
     type: "client.hello",
     client: { name: "test", version: "1" },
     protocol_major: 1,
-    token: "test-token",
+    nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   };
-  expectTypeOf<ClientFrame["type"]>().toEqualTypeOf<"client.hello">();
+  expectTypeOf<ClientFrame["type"]>().toEqualTypeOf<"client.hello" | "client.auth">();
   expect(parseClientFrame(encodeClientFrame(frame))).toEqual({ kind: "frame", frame });
   expect(() => encodeClientFrame({ ...frame, protocol_major: -1 })).toThrow();
 });

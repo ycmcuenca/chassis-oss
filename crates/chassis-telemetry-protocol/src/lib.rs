@@ -1,6 +1,6 @@
 //! Wire types and JSON schemas for Chassis telemetry v1.
 
-use schemars::{JsonSchema, Schema, schema_for};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 
@@ -11,9 +11,50 @@ mod tests;
 pub const PROTOCOL_MAJOR: u16 = 1;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
+// Keep unknown spellings intact so intermediaries can round-trip future values.
+macro_rules! open_enum {
+    ($name:ident, $fallback:ident; $($variant:ident => $wire:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum $name {
+            $($variant,)+
+            $fallback(String),
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(match self {
+                    $(Self::$variant => $wire,)+
+                    Self::$fallback(value) => value,
+                })
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = String::deserialize(deserializer)?;
+                Ok(match value.as_str() {
+                    $($wire => Self::$variant,)+
+                    _ => Self::$fallback(value),
+                })
+            }
+        }
+
+        impl JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                json_schema!({"anyOf": [{"type": "string", "enum": [$($wire),+]}, {"type": "string"}]})
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ServerFrame {
     /// Protocol major version number.
+    #[schemars(range(min = PROTOCOL_MAJOR, max = PROTOCOL_MAJOR))]
     pub v: u16,
     /// Sender wall-clock time in Unix epoch milliseconds.
     #[serde(deserialize_with = "safe_integer")]
@@ -42,9 +83,12 @@ pub enum ServerBody {
     AgentRemove { id: String },
     #[serde(rename = "error")]
     Error { code: ErrorCode, message: String },
+    #[serde(rename = "auth.challenge")]
+    AuthChallenge { nonce: String, proof: String },
 }
 
 const SERVER_TYPES: &[&str] = &[
+    "auth.challenge",
     "hello",
     "host.sample",
     "agents.snapshot",
@@ -56,6 +100,7 @@ const SERVER_TYPES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ClientFrame {
     /// Protocol major version number.
+    #[schemars(range(min = PROTOCOL_MAJOR, max = PROTOCOL_MAJOR))]
     pub v: u16,
     /// Sender wall-clock time in Unix epoch milliseconds.
     #[serde(deserialize_with = "safe_integer")]
@@ -71,10 +116,14 @@ pub enum ClientBody {
     #[serde(rename = "client.hello")]
     Hello {
         /// Protocol major version number spoken by the client.
+        #[schemars(range(min = PROTOCOL_MAJOR, max = PROTOCOL_MAJOR))]
         protocol_major: u16,
-        token: String,
+        /// A fresh 32-byte nonce, encoded as unpadded base64url.
+        nonce: String,
         client: ClientIdentity,
     },
+    #[serde(rename = "client.auth")]
+    Auth { proof: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -131,6 +180,8 @@ pub struct MetricCapabilities {
     pub gpu_power: Availability,
     pub gpu_freq: Availability,
     pub temperatures: Availability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_pressure: Option<Availability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -148,13 +199,13 @@ pub struct Availability {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AvailabilityStatus {
-    Available,
-    Partial,
-    Unavailable,
-}
+open_enum!(AvailabilityStatus, Unknown;
+    Available => "available", Partial => "partial", Unavailable => "unavailable",
+);
+
+open_enum!(PressureLevel, Unknown;
+    Normal => "normal", Warning => "warning", Critical => "critical",
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
@@ -205,6 +256,8 @@ pub struct MemorySample {
     #[serde(deserialize_with = "safe_integer")]
     #[schemars(range(max = MAX_SAFE_INTEGER))]
     pub swap_total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<PressureLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -223,6 +276,8 @@ pub struct NetworkInterfaceSample {
     pub rx_bytes_per_s: f64,
     /// Interface transmit throughput in bytes per second.
     pub tx_bytes_per_s: f64,
+    #[serde(rename = "virtual", default, skip_serializing_if = "Option::is_none")]
+    pub is_virtual: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -314,11 +369,13 @@ pub struct AgentSession {
     /// OS process identifier, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Cumulative tokens including all descendant sessions.
     pub tokens: TokenCounts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextUsage>,
     pub rate_limits: Vec<RateLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Cost including all descendant sessions.
     pub cost: Option<Cost>,
     /// Output rate in tokens per second.
     pub output_tokens_per_s: f64,
@@ -390,58 +447,56 @@ pub struct RateLimit {
     pub resets_at_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "source", rename_all = "snake_case")]
-pub enum Cost {
-    Reported {
-        /// Cost in US dollars.
-        usd: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        price_table: Option<String>,
-    },
-    Estimated {
-        /// Cost in US dollars.
-        usd: f64,
-        price_table: String,
-    },
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct Cost {
+    pub source: CostSource,
+    /// Cost in US dollars.
+    pub usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_table: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentKind {
-    ClaudeCode,
-    Opencode,
-    Codex,
+impl<'de> Deserialize<'de> for Cost {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            source: CostSource,
+            usd: f64,
+            price_table: Option<String>,
+        }
+        let Wire {
+            source,
+            usd,
+            price_table,
+        } = Wire::deserialize(deserializer)?;
+        if source == CostSource::Estimated && price_table.is_none() {
+            return Err(de::Error::custom("estimated cost requires price_table"));
+        }
+        Ok(Self {
+            source,
+            usd,
+            price_table,
+        })
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentState {
-    Thinking,
-    ToolUse,
-    Working,
-    AwaitingApproval,
-    Idle,
-    Unknown,
-}
+open_enum!(CostSource, Unknown; Reported => "reported", Estimated => "estimated");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum StateSource {
-    Reported,
-    Inferred,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    AuthFailed,
-    ProtocolMismatch,
-    Internal,
-}
+open_enum!(AgentKind, Unknown;
+    ClaudeCode => "claude_code", Opencode => "opencode", Codex => "codex",
+);
+open_enum!(AgentState, Unrecognized;
+    Thinking => "thinking", ToolUse => "tool_use", Working => "working",
+    AwaitingApproval => "awaiting_approval", Idle => "idle", Unknown => "unknown",
+);
+open_enum!(StateSource, Unknown; Reported => "reported", Inferred => "inferred");
+open_enum!(ErrorCode, Unknown;
+    AuthFailed => "auth_failed", ProtocolMismatch => "protocol_mismatch", Internal => "internal",
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
+    ProtocolMismatch,
     UnknownType { type_name: String },
     Invalid { reason: String },
 }
@@ -449,12 +504,8 @@ pub enum ParseError {
 impl ServerFrame {
     /// Validate known frames and distinguish unknown types with a valid envelope.
     pub fn parse_lenient(text: &str) -> Result<Self, ParseError> {
-        let value: Value = serde_json::from_str(text).map_err(invalid_json)?;
-        for (field, min, max) in [
-            ("v", 0, u64::from(u16::MAX)),
-            ("ts_ms", 0, MAX_SAFE_INTEGER),
-            ("seq", 1, MAX_SAFE_INTEGER),
-        ] {
+        let value = version_checked_json(text)?;
+        for (field, min, max) in [("ts_ms", 0, MAX_SAFE_INTEGER), ("seq", 1, MAX_SAFE_INTEGER)] {
             if !value[field]
                 .as_u64()
                 .is_some_and(|n| (min..=max).contains(&n))
@@ -479,8 +530,38 @@ impl ServerFrame {
 impl ClientFrame {
     /// Validate a client frame, rejecting unknown frame types.
     pub fn parse(text: &str) -> Result<Self, ParseError> {
-        serde_json::from_str(text).map_err(invalid_json)
+        serde_json::from_value(version_checked_json(text)?).map_err(invalid_json)
     }
+}
+
+/// Check the envelope's version fields without validating the frame body.
+pub fn check_protocol_version(text: &str) -> Result<(), ParseError> {
+    version_checked_json(text).map(|_| ())
+}
+
+fn version_checked_json(text: &str) -> Result<Value, ParseError> {
+    let value: Value = serde_json::from_str(text).map_err(invalid_json)?;
+    let object = value.as_object().ok_or_else(|| ParseError::Invalid {
+        reason: "frame must be an object".into(),
+    })?;
+    for field in ["v", "protocol_major"] {
+        let Some(version) = object
+            .get(field)
+            .or_else(|| (field == "v").then_some(&Value::Null))
+        else {
+            continue;
+        };
+        if version.as_u64() == Some(u64::from(PROTOCOL_MAJOR)) {
+            continue;
+        }
+        if version.is_i64() || version.is_u64() {
+            return Err(ParseError::ProtocolMismatch);
+        }
+        return Err(ParseError::Invalid {
+            reason: format!("{field} must be an integer"),
+        });
+    }
+    Ok(value)
 }
 
 fn invalid_json(error: serde_json::Error) -> ParseError {
@@ -490,7 +571,15 @@ fn invalid_json(error: serde_json::Error) -> ParseError {
 }
 
 pub fn server_schema() -> Schema {
-    schema_for!(ServerFrame)
+    let mut schema = schema_for!(ServerFrame).to_value();
+    // An estimate must include its price table; future sources need not.
+    schema["$defs"]["Cost"]["allOf"] = serde_json::json!([{
+        "anyOf": [
+            {"type": "object", "properties": {"source": {"type": "string", "pattern": "^(?!estimated$)"}}},
+            {"type": "object", "required": ["price_table"], "properties": {"price_table": {"type": "string"}}}
+        ]
+    }]);
+    Schema::try_from(schema).expect("generated frame schema is an object")
 }
 
 pub fn client_schema() -> Schema {

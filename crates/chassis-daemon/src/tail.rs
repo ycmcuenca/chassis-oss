@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chassis_telemetry_protocol::{
     Availability, ClientBody, ClientFrame, ClientIdentity, GpuSample, HostSample, PROTOCOL_MAJOR,
     ParseError, ServerBody, ServerFrame,
@@ -104,6 +105,7 @@ fn host_sample(s: &HostSample) -> String {
 /// One compact line (without a trailing newline) describing a frame.
 pub fn format_frame(frame: &ServerFrame) -> String {
     let body = match &frame.body {
+        ServerBody::AuthChallenge { .. } => "auth.challenge".to_string(),
         ServerBody::Hello(h) => {
             let m = &h.capabilities.metrics;
             format!(
@@ -158,7 +160,7 @@ fn emit(out: &mut impl Write, line: &str) -> Result<(), Error> {
 /// `max_frames` stops after that many printed lines; it exists for tests.
 pub async fn run(
     url: &str,
-    token: &str,
+    _token: &str,
     out: &mut (impl Write + Send),
     max_frames: Option<usize>,
 ) -> Result<(), Error> {
@@ -171,7 +173,7 @@ pub async fn run(
         ts_ms: now_ms(),
         body: ClientBody::Hello {
             protocol_major: PROTOCOL_MAJOR,
-            token: token.to_string(),
+            nonce: URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()),
             client: ClientIdentity {
                 name: CLIENT_NAME.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -204,6 +206,9 @@ pub async fn run(
                     }
                     Err(ParseError::Invalid { reason }) => {
                         emit(out, &format!("! invalid frame: {reason}"))?;
+                    }
+                    Err(ParseError::ProtocolMismatch) => {
+                        return Err(Error::new("daemon speaks an unsupported protocol version"));
                     }
                 }
                 printed += 1;

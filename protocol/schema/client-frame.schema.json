@@ -14,8 +14,8 @@
       "description": "Protocol major version number.",
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 1,
+      "minimum": 1
     }
   },
   "oneOf": [
@@ -25,15 +25,16 @@
         "client": {
           "$ref": "#/$defs/ClientIdentity"
         },
+        "nonce": {
+          "description": "A fresh 32-byte nonce, encoded as unpadded base64url.",
+          "type": "string"
+        },
         "protocol_major": {
           "description": "Protocol major version number spoken by the client.",
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
-        },
-        "token": {
-          "type": "string"
+          "maximum": 1,
+          "minimum": 1
         },
         "type": {
           "type": "string",
@@ -43,8 +44,24 @@
       "required": [
         "type",
         "protocol_major",
-        "token",
+        "nonce",
         "client"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "proof": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "client.auth"
+        }
+      },
+      "required": [
+        "type",
+        "proof"
       ]
     }
   ],

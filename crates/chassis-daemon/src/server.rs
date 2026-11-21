@@ -21,7 +21,6 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::auth::TokenHash;
 use crate::sampler::{SampleRx, StaticInfo};
 
 /// Close code: authentication failed (bad or missing token, or no hello in time).
@@ -142,6 +141,7 @@ fn encode(seq: &mut u64, body: ServerBody) -> Option<String> {
 
 fn frame_kind(body: &ServerBody) -> &'static str {
     match body {
+        ServerBody::AuthChallenge { .. } => "auth.challenge",
         ServerBody::Hello(_) => "hello",
         ServerBody::HostSample(_) => "host.sample",
         ServerBody::AgentsSnapshot { .. } => "agents.snapshot",
@@ -155,8 +155,8 @@ fn frame_kind(body: &ServerBody) -> &'static str {
 enum Reject {
     Timeout,
     Malformed(String),
-    InvalidToken,
-    ProtocolMismatch(u16),
+    AuthenticationUnavailable,
+    ProtocolMismatch,
 }
 
 impl Reject {
@@ -164,8 +164,8 @@ impl Reject {
         match self {
             Reject::Timeout => "timeout",
             Reject::Malformed(_) => "malformed",
-            Reject::InvalidToken => "invalid token",
-            Reject::ProtocolMismatch(_) => "protocol mismatch",
+            Reject::AuthenticationUnavailable => "authentication unavailable",
+            Reject::ProtocolMismatch => "protocol mismatch",
         }
     }
 
@@ -182,14 +182,14 @@ impl Reject {
                 format!("first frame must be a client.hello: {reason}"),
                 CLOSE_MALFORMED,
             ),
-            Reject::InvalidToken => (
+            Reject::AuthenticationUnavailable => (
                 ErrorCode::AuthFailed,
-                "invalid pairing token".to_string(),
+                "authentication is not yet available".to_string(),
                 CLOSE_AUTH_FAILED,
             ),
-            Reject::ProtocolMismatch(n) => (
+            Reject::ProtocolMismatch => (
                 ErrorCode::ProtocolMismatch,
-                format!("daemon speaks protocol {PROTOCOL_MAJOR}; client requested {n}"),
+                format!("daemon speaks protocol {PROTOCOL_MAJOR}"),
                 CLOSE_PROTOCOL,
             ),
         }
@@ -202,6 +202,10 @@ struct Client {
 }
 
 enum Handshake {
+    #[allow(
+        dead_code,
+        reason = "mutual authentication will construct this verdict"
+    )]
     Accepted(Client),
     Rejected(Reject),
     /// The peer closed or the socket failed before a verdict.
@@ -212,11 +216,12 @@ fn parse_reason(error: ParseError) -> String {
     match error {
         ParseError::Invalid { reason } => reason,
         ParseError::UnknownType { type_name } => format!("unknown frame type {type_name}"),
+        ParseError::ProtocolMismatch => "protocol mismatch".into(),
     }
 }
 
 /// Read the first frame within the deadline and check it.
-async fn handshake<R>(rx: &mut R, config: &ServerConfig, deadline: Instant) -> Handshake
+async fn handshake<R>(rx: &mut R, deadline: Instant) -> Handshake
 where
     R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
@@ -233,30 +238,16 @@ where
             Ok(Some(Ok(Message::Text(text)))) => break text,
         }
     };
-    let frame = match ClientFrame::parse(text.as_str()) {
-        Ok(frame) => frame,
-        Err(e) => return Handshake::Rejected(Reject::Malformed(parse_reason(e))),
-    };
-    let ClientBody::Hello {
-        protocol_major,
-        token,
-        client,
-    } = frame.body;
-    // Re-read on every attempt so a re-pair takes effect without a restart.
-    let authorised = matches!(
-        TokenHash::load(&config.config_dir),
-        Ok(Some(hash)) if hash.verify(&token)
-    );
-    if !authorised {
-        return Handshake::Rejected(Reject::InvalidToken);
+    match ClientFrame::parse(text.as_str()) {
+        // Fail closed until mutual authentication is implemented.
+        Ok(ClientFrame {
+            body: ClientBody::Hello { .. },
+            ..
+        }) => Handshake::Rejected(Reject::AuthenticationUnavailable),
+        Ok(_) => Handshake::Rejected(Reject::Malformed("unexpected frame type".into())),
+        Err(ParseError::ProtocolMismatch) => Handshake::Rejected(Reject::ProtocolMismatch),
+        Err(e) => Handshake::Rejected(Reject::Malformed(parse_reason(e))),
     }
-    if protocol_major != PROTOCOL_MAJOR {
-        return Handshake::Rejected(Reject::ProtocolMismatch(protocol_major));
-    }
-    Handshake::Accepted(Client {
-        name: client.name,
-        version: client.version,
-    })
 }
 
 /// A client-supplied string made safe and short enough to log.
@@ -272,7 +263,7 @@ async fn handle_socket(socket: WebSocket, peer: SocketAddr, state: AppState) {
     let (mut tx, mut rx) = socket.split();
     let mut seq = 0u64;
 
-    match handshake(&mut rx, &state.config, deadline).await {
+    match handshake(&mut rx, deadline).await {
         Handshake::Gone => {}
         Handshake::Rejected(reject) => {
             warn!(%peer, reason = reject.category(), "authentication failed");
@@ -444,6 +435,7 @@ mod tests {
                 per_core_pct: vec![1.0],
             },
             memory: MemorySample {
+                pressure: None,
                 used_bytes: n,
                 available_bytes: 1,
                 total_bytes: 2,

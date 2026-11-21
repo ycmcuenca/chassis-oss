@@ -21,8 +21,8 @@
       "description": "Protocol major version number.",
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 1,
+      "minimum": 1
     }
   },
   "oneOf": [
@@ -181,6 +181,26 @@
         "code",
         "message"
       ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string"
+        },
+        "proof": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth.challenge"
+        }
+      },
+      "required": [
+        "type",
+        "nonce",
+        "proof"
+      ]
     }
   ],
   "required": [
@@ -211,11 +231,18 @@
       ]
     },
     "AgentKind": {
-      "type": "string",
-      "enum": [
-        "claude_code",
-        "opencode",
-        "codex"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "claude_code",
+            "opencode",
+            "codex"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "AgentSession": {
@@ -232,6 +259,7 @@
           ]
         },
         "cost": {
+          "description": "Cost including all descendant sessions.",
           "anyOf": [
             {
               "$ref": "#/$defs/Cost"
@@ -309,6 +337,7 @@
           ]
         },
         "tokens": {
+          "description": "Cumulative tokens including all descendant sessions.",
           "$ref": "#/$defs/TokenCounts"
         },
         "workspace_dir": {
@@ -330,14 +359,21 @@
       ]
     },
     "AgentState": {
-      "type": "string",
-      "enum": [
-        "thinking",
-        "tool_use",
-        "working",
-        "awaiting_approval",
-        "idle",
-        "unknown"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "thinking",
+            "tool_use",
+            "working",
+            "awaiting_approval",
+            "idle",
+            "unknown"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "Availability": {
@@ -358,11 +394,18 @@
       ]
     },
     "AvailabilityStatus": {
-      "type": "string",
-      "enum": [
-        "available",
-        "partial",
-        "unavailable"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "available",
+            "partial",
+            "unavailable"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "Capabilities": {
@@ -409,52 +452,65 @@
       }
     },
     "Cost": {
-      "oneOf": [
+      "type": "object",
+      "properties": {
+        "price_table": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/CostSource"
+        },
+        "usd": {
+          "description": "Cost in US dollars.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "allOf": [
         {
-          "type": "object",
-          "properties": {
-            "price_table": {
-              "type": [
-                "string",
-                "null"
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "pattern": "^(?!estimated$)"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "price_table": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "price_table"
               ]
-            },
-            "source": {
-              "type": "string",
-              "const": "reported"
-            },
-            "usd": {
-              "description": "Cost in US dollars.",
-              "type": "number",
-              "format": "double"
             }
-          },
-          "required": [
-            "source",
-            "usd"
+          ]
+        }
+      ],
+      "required": [
+        "source",
+        "usd"
+      ]
+    },
+    "CostSource": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "reported",
+            "estimated"
           ]
         },
         {
-          "type": "object",
-          "properties": {
-            "price_table": {
-              "type": "string"
-            },
-            "source": {
-              "type": "string",
-              "const": "estimated"
-            },
-            "usd": {
-              "description": "Cost in US dollars.",
-              "type": "number",
-              "format": "double"
-            }
-          },
-          "required": [
-            "source",
-            "usd",
-            "price_table"
-          ]
+          "type": "string"
         }
       ]
     },
@@ -504,11 +560,18 @@
       ]
     },
     "ErrorCode": {
-      "type": "string",
-      "enum": [
-        "auth_failed",
-        "protocol_mismatch",
-        "internal"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "auth_failed",
+            "protocol_mismatch",
+            "internal"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "GpuSample": {
@@ -638,6 +701,16 @@
           "maximum": 9007199254740991,
           "minimum": 0
         },
+        "pressure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PressureLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "swap_total_bytes": {
           "description": "Total swap in bytes.",
           "type": "integer",
@@ -690,6 +763,16 @@
         "gpu_usage": {
           "$ref": "#/$defs/Availability"
         },
+        "memory_pressure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Availability"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "temperatures": {
           "$ref": "#/$defs/Availability"
         }
@@ -717,6 +800,12 @@
           "description": "Interface transmit throughput in bytes per second.",
           "type": "number",
           "format": "double"
+        },
+        "virtual": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [
@@ -749,6 +838,21 @@
         "rx_bytes_per_s",
         "tx_bytes_per_s",
         "interfaces"
+      ]
+    },
+    "PressureLevel": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "normal",
+            "warning",
+            "critical"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "ProcessSample": {
@@ -841,10 +945,17 @@
       ]
     },
     "StateSource": {
-      "type": "string",
-      "enum": [
-        "reported",
-        "inferred"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "reported",
+            "inferred"
+          ]
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "TokenCounts": {

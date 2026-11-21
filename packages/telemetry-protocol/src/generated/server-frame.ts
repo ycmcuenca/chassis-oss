@@ -55,29 +55,34 @@ export type ServerFrame = {
       message: string;
       type: "error";
     }
-);
-export type AvailabilityStatus = "available" | "partial" | "unavailable";
-export type AgentKind = "claude_code" | "opencode" | "codex";
-export type Cost =
   | {
-      price_table?: string | null;
-      source: "reported";
-      /**
-       * Cost in US dollars.
-       */
-      usd: number;
+      nonce: string;
+      proof: string;
+      type: "auth.challenge";
+    }
+);
+export type AvailabilityStatus = ("available" | "partial" | "unavailable") | string;
+export type AgentKind = ("claude_code" | "opencode" | "codex") | string;
+export type PressureLevel = ("normal" | "warning" | "critical") | string;
+export type Cost = (
+  | {
+      source?: string;
     }
   | {
       price_table: string;
-      source: "estimated";
-      /**
-       * Cost in US dollars.
-       */
-      usd: number;
-    };
-export type AgentState = "thinking" | "tool_use" | "working" | "awaiting_approval" | "idle" | "unknown";
-export type StateSource = "reported" | "inferred";
-export type ErrorCode = "auth_failed" | "protocol_mismatch" | "internal";
+    }
+) & {
+  price_table?: string | null;
+  source: CostSource;
+  /**
+   * Cost in US dollars.
+   */
+  usd: number;
+};
+export type CostSource = ("reported" | "estimated") | string;
+export type AgentState = ("thinking" | "tool_use" | "working" | "awaiting_approval" | "idle" | "unknown") | string;
+export type StateSource = ("reported" | "inferred") | string;
+export type ErrorCode = ("auth_failed" | "protocol_mismatch" | "internal") | string;
 
 export interface Capabilities {
   agents: AgentCapability[];
@@ -93,6 +98,7 @@ export interface MetricCapabilities {
   gpu_memory: Availability;
   gpu_power: Availability;
   gpu_usage: Availability;
+  memory_pressure?: Availability | null;
   temperatures: Availability;
 }
 export interface Availability {
@@ -178,6 +184,7 @@ export interface MemorySample {
    * Available memory in bytes.
    */
   available_bytes: number;
+  pressure?: PressureLevel | null;
   /**
    * Total swap in bytes.
    */
@@ -216,6 +223,7 @@ export interface NetworkInterfaceSample {
    * Interface transmit throughput in bytes per second.
    */
   tx_bytes_per_s: number;
+  virtual?: boolean | null;
 }
 export interface ProcessSample {
   /**
@@ -235,6 +243,9 @@ export interface ProcessSample {
 }
 export interface AgentSession {
   context?: ContextUsage | null;
+  /**
+   * Cost including all descendant sessions.
+   */
   cost?: Cost | null;
   id: string;
   kind: AgentKind;
@@ -288,6 +299,9 @@ export interface RateLimit {
    */
   window_minutes: number;
 }
+/**
+ * Cumulative tokens including all descendant sessions.
+ */
 export interface TokenCounts {
   /**
    * Cumulative cache-read token count.

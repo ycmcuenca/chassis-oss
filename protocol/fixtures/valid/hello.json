@@ -37,6 +37,9 @@
       "gpu_power": {
         "status": "unavailable",
         "reason": "Power sensor not exposed"
+      },
+      "memory_pressure": {
+        "status": "available"
       }
     },
     "agents": [

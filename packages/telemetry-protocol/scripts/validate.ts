@@ -36,6 +36,9 @@ function main(paths: string[]): number {
     case "unknown_type":
       console.log(`ts: unknown (${result.type})`);
       break;
+    case "protocol_mismatch":
+      console.log(`ts: protocol mismatch (${type})`);
+      break;
     case "invalid":
       console.log(`ts: rejected (${type})`);
       for (const { path, message } of result.issues) {

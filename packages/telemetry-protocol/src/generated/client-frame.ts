@@ -9,15 +9,24 @@ export type ClientFrame = {
    * Protocol major version number.
    */
   v: number;
-} & {
-  client: ClientIdentity;
-  /**
-   * Protocol major version number spoken by the client.
-   */
-  protocol_major: number;
-  token: string;
-  type: "client.hello";
-};
+} & (
+  | {
+      client: ClientIdentity;
+      /**
+       * A fresh 32-byte nonce, encoded as unpadded base64url.
+       */
+      nonce: string;
+      /**
+       * Protocol major version number spoken by the client.
+       */
+      protocol_major: number;
+      type: "client.hello";
+    }
+  | {
+      proof: string;
+      type: "client.auth";
+    }
+);
 
 export interface ClientIdentity {
   name: string;

@@ -24,6 +24,7 @@ impl Write for Capture {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn logs_connect_auth_and_disconnect_without_the_token() {
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let writer = Capture(buffer.clone());

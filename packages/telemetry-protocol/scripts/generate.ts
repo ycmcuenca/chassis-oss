@@ -10,7 +10,7 @@ for (const [name, schema] of [
   ["client-frame", clientJson],
 ] as const) {
   // JSON imports widen schema keywords such as "object" to string.
-  const types = await compile(schema as Parameters<typeof compile>[0], schema.title, {
+  const types = await compile(schema as unknown as Parameters<typeof compile>[0], schema.title, {
     additionalProperties: false,
     bannerComment: "// Generated from JSON Schema. Run pnpm run generate to regenerate.",
   });

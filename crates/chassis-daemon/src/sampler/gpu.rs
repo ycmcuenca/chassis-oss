@@ -180,6 +180,7 @@ pub fn capabilities(
     };
 
     MetricCapabilities {
+        memory_pressure: None,
         gpu_usage,
         gpu_memory,
         gpu_power,

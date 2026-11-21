@@ -47,6 +47,7 @@ pub fn aggregate_network(records: &[NetRecord], elapsed: Duration) -> NetworkSam
         .iter()
         .filter(|r| !r.is_loopback && r.lifetime_total > 0)
         .map(|r| NetworkInterfaceSample {
+            is_virtual: None,
             name: r.name.clone(),
             rx_bytes_per_s: rate(r.delta_rx, elapsed),
             tx_bytes_per_s: rate(r.delta_tx, elapsed),

@@ -4,6 +4,10 @@ The Rust types are the source of truth. The published
 [server schema](schema/server-frame.schema.json) and
 [client schema](schema/client-frame.schema.json) define the JSON wire format.
 
+Version 1 is a draft until the first tagged client release. Until then,
+incompatible changes are made in place; after that release the compatibility
+rules below apply.
+
 ## Frames
 
 - `hello` — server host identity, capabilities, and sample interval.
@@ -12,12 +16,29 @@ The Rust types are the source of truth. The published
 - `agent.upsert` — an added or updated session.
 - `agent.remove` — the ID of a session that ended.
 - `error` — server error code and message before disconnecting.
-- `client.hello` — the first client frame: protocol major, pairing token, and client name and version.
+- `client.hello` — first client frame: `protocol_major`, client name and version, and `nonce`.
+- `auth.challenge` — first server frame (`seq: 1`): server `nonce` and `proof`.
+- `client.auth` — client's `proof`, sent only after verifying the server's proof.
 
 Each frame is one JSON message. The envelope fields are at the same level as
 the body: `v` is the protocol major, `ts_ms` is the sender's Unix epoch time in
 milliseconds, and `type` identifies the frame. Server frames also have `seq`,
 which starts at 1 on each connection and increases by 1 per frame.
+
+## Mutual authentication
+
+Each peer sends a fresh random 32-byte nonce as base64url without padding.
+Let `nc` and `ns` be the decoded client and server nonces. For pairing token
+`T`, `K = SHA-256(T)` is the raw 32-byte hash, not its hex encoding.
+
+```text
+proof_s = HMAC-SHA-256(K, "chassis/v1/server" || 0x00 || nc || ns)
+proof_c = HMAC-SHA-256(K, "chassis/v1/client" || 0x00 || nc || ns)
+```
+
+Proofs are base64url without padding and verified in constant time. Neither
+`T` nor `K` crosses the wire. The server sends `hello` and telemetry only after
+verifying `client.auth`. This handshake does not encrypt the connection.
 
 ## Units
 
@@ -47,9 +68,17 @@ infinity serialises as `null` and fails validation.
 Within a major version, changes may only add optional fields or new frame
 types. Receivers ignore unknown fields. The lenient server-frame parsers skip an
 unknown type only if its envelope is complete and valid; otherwise they reject
-the frame. The first client frame must be `client.hello`. A server that
-receives an unsupported protocol major replies with `protocol_mismatch` and
-closes the connection.
+the frame. Both parsers check that `v` equals 1 and that `protocol_major`,
+if present, also equals 1 before checking the body. An unsupported integer
+version is a protocol mismatch, not a malformed body. A server that receives
+an unsupported protocol major replies with `protocol_mismatch` and closes.
+
+Agent kind, agent state, state source, availability status, error code, cost
+source and memory pressure level are open enums: accept and preserve unknown
+strings, but reject non-strings. Known memory pressure levels are `normal`,
+`warning`, and `critical`. A virtual network interface may carry `"virtual":
+true`; a physical interface can omit the flag. Session token and cost totals
+already include all descendant sessions.
 
 - `state_source` is `reported` when the agent supplies its state, or `inferred`
   when the adapter derives it from logs, timestamps, or process presence.
@@ -64,7 +93,9 @@ closes the connection.
 
 Shared fixtures live in [`fixtures/`](fixtures/): `valid/` frames are accepted,
 `invalid/` frames are rejected, and `unknown/` frames have valid envelopes but
-unrecognized server types. Client fixtures have a `client-` filename prefix;
+unrecognized server types. `mismatch/` frames fail the major-version check;
+`handshake/` holds a synthetic known-answer vector, not a frame.
+Client fixtures have a `client-` filename prefix;
 the CLI uses the JSON `type`, not the filename, to choose a parser.
 
 Run these commands from the public repo root (`oss/` in the monorepo):

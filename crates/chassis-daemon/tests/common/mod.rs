@@ -43,6 +43,7 @@ pub fn static_info() -> sampler::StaticInfo {
             memory_total_bytes: 1 << 30,
         },
         metrics: MetricCapabilities {
+            memory_pressure: None,
             gpu_usage: unavailable(),
             gpu_memory: unavailable(),
             gpu_power: unavailable(),
@@ -59,6 +60,7 @@ pub fn sample(n: u64) -> Arc<HostSample> {
             per_core_pct: vec![10.0, 15.0],
         },
         memory: MemorySample {
+            pressure: None,
             used_bytes: n,
             available_bytes: 1,
             total_bytes: 1 << 30,
@@ -163,13 +165,16 @@ impl Harness {
     }
 }
 
-pub async fn send_hello(ws: &mut Ws, token: &str, major: u16) {
+pub async fn send_hello(ws: &mut Ws, _token: &str, major: u16) {
     let frame = ClientFrame {
         v: PROTOCOL_MAJOR,
         ts_ms: 0,
         body: ClientBody::Hello {
             protocol_major: major,
-            token: token.to_string(),
+            nonce: base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                rand::random::<[u8; 32]>(),
+            ),
             client: ClientIdentity {
                 name: "test".to_string(),
                 version: "0".to_string(),

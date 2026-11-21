@@ -280,6 +280,7 @@ impl Sources {
                     .collect(),
             },
             memory: MemorySample {
+                pressure: None,
                 used_bytes: self.sys.used_memory(),
                 available_bytes: self.sys.available_memory(),
                 total_bytes: self.sys.total_memory(),

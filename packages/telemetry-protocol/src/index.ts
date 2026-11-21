@@ -42,7 +42,32 @@ const serverVariants = new Map(
 export type Issue = { path: (string | number)[]; message: string };
 type Invalid = { kind: "invalid"; issues: Issue[] };
 type Parsed<T> = { kind: "frame"; frame: T };
-export type ParseResult = Parsed<ServerFrame> | { kind: "unknown_type"; type: string } | Invalid;
+type ProtocolMismatch = { kind: "protocol_mismatch" };
+export type ParseResult =
+  | Parsed<ServerFrame>
+  | { kind: "unknown_type"; type: string }
+  | ProtocolMismatch
+  | Invalid;
+
+export const PROTOCOL_MAJOR = 1;
+
+function checkVersion(value: unknown): Invalid | ProtocolMismatch | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { kind: "invalid", issues: [{ path: [], message: "frame must be an object" }] };
+  }
+  const envelope = value as Record<string, unknown>;
+  for (const field of ["v", "protocol_major"]) {
+    if (field === "protocol_major" && !(field in envelope)) continue;
+    const version = envelope[field];
+    if (typeof version !== "number" || !Number.isInteger(version)) {
+      return {
+        kind: "invalid",
+        issues: [{ path: [field], message: `${field} must be an integer` }],
+      };
+    }
+    if (version !== PROTOCOL_MAJOR) return { kind: "protocol_mismatch" };
+  }
+}
 
 function invalid(issues: readonly z.ZodIssue[]): Invalid {
   return {
@@ -68,13 +93,11 @@ function parseJson(text: string): { kind: "json"; value: unknown } | Invalid {
 export function parseServerFrame(text: string): ParseResult {
   const json = parseJson(text);
   if (json.kind === "invalid") return json;
+  const versionError = checkVersion(json.value);
+  if (versionError) return versionError;
 
-  const envelope =
-    typeof json.value === "object" && json.value !== null
-      ? (json.value as Record<string, unknown>)
-      : {};
+  const envelope = json.value as Record<string, unknown>;
   for (const [field, min, max] of [
-    ["v", 0, 65535],
     ["ts_ms", 0, Number.MAX_SAFE_INTEGER],
     ["seq", 1, Number.MAX_SAFE_INTEGER],
   ] as const) {
@@ -100,9 +123,11 @@ export function parseServerFrame(text: string): ParseResult {
   return invalid(detail.success ? result.error.issues : detail.error.issues);
 }
 
-export function parseClientFrame(text: string): Parsed<ClientFrame> | Invalid {
+export function parseClientFrame(text: string): Parsed<ClientFrame> | Invalid | ProtocolMismatch {
   const json = parseJson(text);
   if (json.kind === "invalid") return json;
+  const versionError = checkVersion(json.value);
+  if (versionError) return versionError;
   const result = clientFrameSchema.safeParse(json.value);
   return result.success ? { kind: "frame", frame: result.data } : invalid(result.error.issues);
 }

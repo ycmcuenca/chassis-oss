@@ -8,3 +8,8 @@ license.workspace = true
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+
+[dev-dependencies]
+base64 = "0.22"
+hmac = "0.13"
+sha2 = "0.11"

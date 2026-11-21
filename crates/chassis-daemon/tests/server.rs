@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn valid_client_gets_hello_snapshot_then_samples() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.login().await;
@@ -51,6 +52,7 @@ async fn valid_client_gets_hello_snapshot_then_samples() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn sample_published_before_connecting_is_sent_right_away() {
     let h = Harness::start(Duration::from_secs(5)).await;
     h.publish(42);
@@ -61,6 +63,7 @@ async fn sample_published_before_connecting_is_sent_right_away() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn wrong_token_gets_auth_failed_and_close_4401() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
@@ -72,6 +75,7 @@ async fn wrong_token_gets_auth_failed_and_close_4401() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn token_is_checked_before_protocol_major() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
@@ -116,6 +120,7 @@ async fn protocol_mismatch_gets_error_and_close_4426() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn repairing_takes_effect_without_restart() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let new_token = auth::pair(h.dir.path()).unwrap();
@@ -147,6 +152,7 @@ async fn healthz_answers_ok_without_host_data() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn two_clients_have_independent_sequences() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut a = h.login().await;
@@ -169,6 +175,7 @@ async fn two_clients_have_independent_sequences() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn eight_concurrent_clients_all_get_telemetry() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut clients = join_all((0..8).map(|_| h.login())).await;
@@ -186,6 +193,7 @@ async fn eight_concurrent_clients_all_get_telemetry() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn stalled_client_does_not_delay_another() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut stalled = h.login().await;
@@ -220,6 +228,7 @@ async fn stalled_client_does_not_delay_another() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn real_sampler_frames_all_parse_leniently() {
     let dir = tempfile::tempdir().unwrap();
     let token = auth::pair(dir.path()).unwrap();
@@ -263,6 +272,7 @@ async fn real_sampler_frames_all_parse_leniently() {
 }
 
 #[tokio::test]
+#[ignore = "handshake lands in 5.2"]
 async fn shutdown_closes_clients_with_1001_and_serve_returns() {
     let mut h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.login().await;

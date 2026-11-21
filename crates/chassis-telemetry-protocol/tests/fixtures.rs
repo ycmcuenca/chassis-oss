@@ -24,7 +24,7 @@ fn shared_fixtures() {
         .collect();
     let mut covered = BTreeSet::new();
 
-    for verdict in ["valid", "invalid", "unknown"] {
+    for verdict in ["valid", "invalid", "unknown", "mismatch"] {
         let dir = root.join(verdict);
         let mut paths: Vec<_> = fs::read_dir(&dir)
             .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
@@ -59,6 +59,7 @@ fn shared_fixtures() {
                 }
                 ("valid", Ok(None))
                 | ("invalid", Err(ParseError::Invalid { .. }))
+                | ("mismatch", Err(ParseError::ProtocolMismatch))
                 | ("unknown", Err(ParseError::UnknownType { .. })) => {}
                 (_, actual) => panic!("{}: expected {verdict}, got {actual:?}", path.display()),
             }
@@ -66,4 +67,51 @@ fn shared_fixtures() {
     }
 
     assert_eq!(covered, server_types, "valid/ server frame type coverage");
+}
+
+#[test]
+fn handshake_known_answer() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use hmac::{Hmac, KeyInit, Mac};
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+
+    let json = |text| serde_json::from_str::<Value>(text).unwrap();
+    let vector = json(include_str!(
+        "../../../protocol/fixtures/handshake/known-answer.json"
+    ));
+    let key = Sha256::digest(vector["token"].as_str().unwrap());
+    let nc = URL_SAFE_NO_PAD
+        .decode(vector["nc"].as_str().unwrap())
+        .unwrap();
+    let ns = URL_SAFE_NO_PAD
+        .decode(vector["ns"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(nc.len(), 32);
+    assert_eq!(ns.len(), 32);
+    let proof = |label: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(label);
+        mac.update(&[0]);
+        mac.update(&nc);
+        mac.update(&ns);
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    };
+    assert_eq!(proof(b"chassis/v1/server"), vector["proof_s"]);
+    assert_eq!(proof(b"chassis/v1/client"), vector["proof_c"]);
+    assert_ne!(vector["proof_s"], vector["proof_c"]);
+
+    let hello = json(include_str!(
+        "../../../protocol/fixtures/valid/client-hello.json"
+    ));
+    let challenge = json(include_str!(
+        "../../../protocol/fixtures/valid/auth-challenge.json"
+    ));
+    let auth = json(include_str!(
+        "../../../protocol/fixtures/valid/client-auth.json"
+    ));
+    assert_eq!(hello["nonce"], vector["nc"]);
+    assert_eq!(challenge["nonce"], vector["ns"]);
+    assert_eq!(challenge["proof"], vector["proof_s"]);
+    assert_eq!(auth["proof"], vector["proof_c"]);
 }

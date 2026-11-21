@@ -1,0 +1,67 @@
+{
+  "v": 1,
+  "ts_ms": 1795000000000,
+  "seq": 2,
+  "type": "host.sample",
+  "cpu": {
+    "usage_pct": 25,
+    "per_core_pct": [
+      20,
+      25,
+      30,
+      15,
+      35,
+      25
+    ]
+  },
+  "memory": {
+    "used_bytes": 8589934592,
+    "available_bytes": 25769803776,
+    "total_bytes": 34359738368,
+    "swap_used_bytes": 0,
+    "swap_total_bytes": 2147483648,
+    "pressure": "warning"
+  },
+  "network": {
+    "rx_bytes_per_s": 24576,
+    "tx_bytes_per_s": 8192,
+    "interfaces": [
+      {
+        "name": "eth0",
+        "rx_bytes_per_s": 24576,
+        "tx_bytes_per_s": 8192
+      },
+      {
+        "name": "utun0",
+        "rx_bytes_per_s": 0,
+        "tx_bytes_per_s": 0,
+        "virtual": true
+      }
+    ]
+  },
+  "disk": {
+    "read_bytes_per_s": 262144,
+    "write_bytes_per_s": 65536
+  },
+  "gpus": [
+    {
+      "name": "Radeon RX 6600",
+      "vendor": "AMD",
+      "usage_pct": 42,
+      "vram_used_bytes": 2147483648,
+      "vram_total_bytes": 8589934592,
+      "freq_mhz": 1750,
+      "power_w": 64.5,
+      "temp_c": 58
+    }
+  ],
+  "top_processes": [
+    {
+      "pid": 3812,
+      "name": "codex",
+      "cpu_pct": 12.5,
+      "memory_bytes": 201326592
+    }
+  ],
+  "uptime_s": 43200
+}

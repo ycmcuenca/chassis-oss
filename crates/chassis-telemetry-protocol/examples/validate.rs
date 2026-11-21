@@ -25,6 +25,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => println!("rust: accepted ({type_name})"),
         Err(ParseError::UnknownType { type_name }) => println!("rust: unknown ({type_name})"),
+        Err(ParseError::ProtocolMismatch) => println!("rust: protocol mismatch ({type_name})"),
         Err(ParseError::Invalid { reason }) => {
             println!("rust: rejected ({type_name})");
             for line in reason.lines() {
