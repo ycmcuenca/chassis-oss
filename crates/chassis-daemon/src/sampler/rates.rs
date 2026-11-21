@@ -1,6 +1,6 @@
 //! Pure rate maths and aggregation over plain data, so tests need no live counters.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chassis_telemetry_protocol::{DiskSample, NetworkInterfaceSample, NetworkSample};
@@ -41,22 +41,49 @@ pub fn is_loopback_name(name: &str) -> bool {
     name == "lo" || name.starts_with("lo0")
 }
 
-/// Sums active, non-loopback interfaces and lists them by name with their rates.
+fn is_virtual(name: &str) -> bool {
+    [
+        "utun",
+        "ipsec",
+        "gif",
+        "stf",
+        "awdl",
+        "llw",
+        "bridge",
+        "vmenet",
+        "anpi",
+        "ap",
+        "tun",
+        "tap",
+        "wg",
+        "tailscale",
+        "docker",
+        "veth",
+        "virbr",
+        "br-",
+        "zt",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+
+/// Lists active, non-loopback interfaces but sums only non-virtual rates.
 pub fn aggregate_network(records: &[NetRecord], elapsed: Duration) -> NetworkSample {
     let mut interfaces: Vec<NetworkInterfaceSample> = records
         .iter()
         .filter(|r| !r.is_loopback && r.lifetime_total > 0)
         .map(|r| NetworkInterfaceSample {
-            is_virtual: None,
+            is_virtual: is_virtual(&r.name).then_some(true),
             name: r.name.clone(),
             rx_bytes_per_s: rate(r.delta_rx, elapsed),
             tx_bytes_per_s: rate(r.delta_tx, elapsed),
         })
         .collect();
     interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+    let physical = || interfaces.iter().filter(|i| i.is_virtual.is_none());
     NetworkSample {
-        rx_bytes_per_s: interfaces.iter().map(|i| i.rx_bytes_per_s).sum(),
-        tx_bytes_per_s: interfaces.iter().map(|i| i.tx_bytes_per_s).sum(),
+        rx_bytes_per_s: physical().map(|i| i.rx_bytes_per_s).sum(),
+        tx_bytes_per_s: physical().map(|i| i.tx_bytes_per_s).sum(),
         interfaces,
     }
 }
@@ -71,25 +98,28 @@ pub struct DiskRecord {
 }
 
 #[derive(Hash, PartialEq, Eq)]
-enum DiskKey {
+enum DiskKey<'a> {
     Id(u64),
-    Name(String),
+    Name(&'a str),
 }
 
 /// Sums disk I/O once per device: dedupe by `id`, falling back to the device name.
 pub fn aggregate_disk(records: &[DiskRecord], elapsed: Duration) -> DiskSample {
-    let mut seen = HashSet::new();
-    let (mut read, mut written) = (0u64, 0u64);
+    let mut devices = HashMap::<_, (u64, u64)>::new();
     for record in records {
         let key = match record.id {
             Some(id) => DiskKey::Id(id),
-            None => DiskKey::Name(record.name.clone()),
+            None => DiskKey::Name(&record.name),
         };
-        if seen.insert(key) {
-            read = read.saturating_add(record.read);
-            written = written.saturating_add(record.written);
-        }
+        let (read, written) = devices.entry(key).or_default();
+        *read = (*read).max(record.read);
+        *written = (*written).max(record.written);
     }
+    let (read, written) = devices
+        .into_values()
+        .fold((0u64, 0u64), |(r, w), (dr, dw)| {
+            (r.saturating_add(dr), w.saturating_add(dw))
+        });
     DiskSample {
         read_bytes_per_s: rate(read, elapsed),
         write_bytes_per_s: rate(written, elapsed),
@@ -152,6 +182,46 @@ mod tests {
         let sample = aggregate_network(&[net("en0", 10, 10, 1, false)], Duration::ZERO);
         assert_eq!(sample.rx_bytes_per_s, 0.0);
         assert_eq!(sample.interfaces[0].tx_bytes_per_s, 0.0);
+    }
+
+    #[test]
+    fn tunnel_rates_are_listed_but_not_added_to_totals() {
+        let sample = aggregate_network(
+            &[
+                net("en0", 12_484, 33, 1, false),
+                net("utun4", 18_524, 44, 1, false),
+            ],
+            Duration::from_secs(1),
+        );
+        assert_eq!(sample.rx_bytes_per_s, 12_484.0);
+        assert_eq!(sample.tx_bytes_per_s, 33.0);
+        assert_eq!(sample.interfaces[0].is_virtual, None);
+        assert_eq!(sample.interfaces[1].is_virtual, Some(true));
+        assert_eq!(sample.interfaces[1].rx_bytes_per_s, 18_524.0);
+    }
+
+    #[test]
+    fn disk_uses_independent_maxima_in_either_order() {
+        let mut records = [
+            DiskRecord {
+                id: Some(7),
+                name: "a".into(),
+                read: 110_718_976,
+                written: 10,
+            },
+            DiskRecord {
+                id: Some(7),
+                name: "b".into(),
+                read: 104_726_528,
+                written: 20,
+            },
+        ];
+        for _ in 0..2 {
+            let sample = aggregate_disk(&records, Duration::from_secs(2));
+            assert_eq!(sample.read_bytes_per_s, 55_359_488.0);
+            assert_eq!(sample.write_bytes_per_s, 10.0);
+            records.reverse();
+        }
     }
 
     #[test]

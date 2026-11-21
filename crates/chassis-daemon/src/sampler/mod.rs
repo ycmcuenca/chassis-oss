@@ -2,6 +2,7 @@
 //! [`HostSample`] on a `tokio::sync::watch` channel.
 
 mod gpu;
+mod memory;
 mod processes;
 mod rates;
 
@@ -11,9 +12,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use chassis_telemetry_protocol::{
-    CpuSample, HostIdentity, HostSample, MemorySample, MetricCapabilities,
-};
+use chassis_telemetry_protocol::{CpuSample, HostIdentity, HostSample, MetricCapabilities};
 use sysinfo::{DiskRefreshKind, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::sync::watch;
 
@@ -121,6 +120,7 @@ impl SamplerHandle {
 /// Starts the sampler thread. Every source is built inside it; a required source that fails
 /// to initialise makes this return `cannot initialise <source>: <error>`.
 pub fn spawn(interval: Duration, host_id: String) -> Result<SamplerHandle, Error> {
+    let interval = interval.max(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     let (tx, samples) = watch::channel(None);
     let (init_tx, init_rx) = mpsc::channel::<Result<StaticInfo, String>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -246,10 +246,11 @@ impl Sources {
         let mut sys = required("System", System::new())?;
         let nets = required("Networks", Networks::new_with_refreshed_list())?;
         let disks = required("Disks", Disks::new_with_refreshed_list())?;
-        // Brand and CPU count need one CPU refresh; it also sets the usage baseline.
+        // Brand and CPU count need one CPU refresh.
         sys.refresh_cpu_all();
         sys.refresh_memory();
-        let (gpu, metrics) = GpuSource::init();
+        let (gpu, mut metrics) = GpuSource::init();
+        metrics.memory_pressure = Some(memory::capability(memory::pressure()));
 
         let host = HostIdentity {
             id: host_id,
@@ -266,6 +267,9 @@ impl Sources {
             memory_total_bytes: sys.total_memory(),
         };
 
+        // Seed the delta counters just before starting the first sampling interval.
+        sys.refresh_cpu_usage();
+        refresh_processes(&mut sys);
         let sources = Sources {
             sys,
             nets,
@@ -285,11 +289,7 @@ impl Sources {
         self.nets.refresh(true);
         self.disks
             .refresh_specifics(true, DiskRefreshKind::nothing().with_io_usage());
-        self.sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory(),
-        );
+        refresh_processes(&mut self.sys);
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last);
         self.last = now;
@@ -358,14 +358,7 @@ impl Sources {
                     .map(|c| rates::pct(c.usage()))
                     .collect(),
             },
-            memory: MemorySample {
-                pressure: None,
-                used_bytes: self.sys.used_memory(),
-                available_bytes: self.sys.available_memory(),
-                total_bytes: self.sys.total_memory(),
-                swap_used_bytes: self.sys.used_swap(),
-                swap_total_bytes: self.sys.total_swap(),
-            },
+            memory: memory::sample(&self.sys, memory::pressure().ok().flatten()),
             network: rates::aggregate_network(&net_records, elapsed),
             disk: rates::aggregate_disk(&disk_records, elapsed),
             gpus: self.gpu.sample(&mut self.log),
@@ -373,6 +366,14 @@ impl Sources {
             uptime_s: self.last_uptime,
         }
     }
+}
+
+fn refresh_processes(sys: &mut System) {
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
+    );
 }
 
 #[cfg(test)]
@@ -439,6 +440,55 @@ mod tests {
             );
         }
         handle.stop();
+    }
+
+    #[tokio::test]
+    async fn first_sample_reports_cpu_for_a_busy_process() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let busy_stop = stop.clone();
+        let (ready, started) = mpsc::channel();
+        let busy = std::thread::spawn(move || {
+            // Ensure the process has accumulated CPU time before the baseline.
+            let warmup = Instant::now();
+            while warmup.elapsed() < Duration::from_millis(100) {
+                std::hint::spin_loop();
+            }
+            let _ = ready.send(());
+            while !busy_stop.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        });
+        let result = async {
+            started.recv().ok()?;
+            let handle = spawn(Duration::from_secs(2), "test-host".into()).ok()?;
+            let mut samples = handle.samples.clone();
+            let first =
+                tokio::time::timeout(Duration::from_secs(10), samples.wait_for(Option::is_some))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|sample| sample.clone());
+            let cores = handle.info.host.cpu_cores;
+            handle.stop();
+            first.map(|sample| (sample, cores))
+        }
+        .await;
+        stop.store(true, Ordering::Relaxed);
+        busy.join().unwrap();
+
+        let (sample, cores) = result.expect("first sample within 10 s");
+        let process = sample
+            .top_processes
+            .iter()
+            .find(|p| p.pid == std::process::id())
+            .expect("busy process should be in the first sample");
+        assert!(
+            process.cpu_pct >= 80.0 / f64::from(cores),
+            "{process:?}, {cores} cores"
+        );
+        assert!(sample.top_processes.iter().all(|p| p.cpu_pct <= 100.0));
     }
 
     #[test]
