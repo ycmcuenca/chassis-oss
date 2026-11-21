@@ -8,9 +8,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
 
 use crate::auth::{self, TOKEN_HASH_FILE};
 use crate::{config, sampler, server, tail};
@@ -111,7 +113,9 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
             args.bind
         )));
     }
-    if auth::TokenHash::load(config_dir)?.is_none() {
+    let key = auth::TokenHash::load(config_dir)
+        .inspect_err(|err| tracing::error!(%err, "pairing token file is unusable"))?;
+    if key.is_none() {
         return Err(Error::new(format!(
             "no pairing token found in {}; run `chassis-daemon pair` first",
             config_dir.display()
@@ -225,12 +229,19 @@ fn raise_nofile() -> std::io::Result<libc::rlim_t> {
     Ok(limit.rlim_cur)
 }
 
+/// Apply the requested level to daemon targets, but never log library wire
+/// traffic at trace. Deliberately ignore RUST_LOG so it cannot bypass the cap.
+pub fn log_filter(level: LevelFilter) -> EnvFilter {
+    let libraries = level.min(LevelFilter::DEBUG);
+    EnvFilter::new(format!("{libraries},chassis_daemon={level}"))
+}
+
 fn init_logging(level: LevelFilter) {
     // A second initialisation (in-process tests) is harmless.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
-        .with_max_level(level)
+        .with_env_filter(log_filter(level))
         .with_target(false)
         .try_init();
 }
@@ -272,7 +283,13 @@ fn run(cli: Cli) -> Result<(), Error> {
 
 /// Parse arguments, run the command and map the outcome to an exit code.
 pub fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let parsed = Cli::command().try_get_matches().and_then(|matches| {
+        let token_on_command_line = matches
+            .subcommand_matches("tail")
+            .is_some_and(|tail| tail.value_source("token") == Some(ValueSource::CommandLine));
+        Cli::from_arg_matches(&matches).map(|cli| (cli, token_on_command_line))
+    });
+    let (cli, token_on_command_line) = match parsed {
         Ok(cli) => cli,
         Err(err) => {
             let code = if err.use_stderr() { 2 } else { 0 };
@@ -280,6 +297,11 @@ pub fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    if token_on_command_line {
+        eprintln!(
+            "warning: command-line arguments are visible to other users; use CHASSIS_TOKEN instead of --token"
+        );
+    }
     let level = match &cli.command {
         Command::Serve(args) => args.log_level,
         _ => LevelFilter::WARN,

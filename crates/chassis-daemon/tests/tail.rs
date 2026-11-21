@@ -3,6 +3,7 @@
 mod common;
 
 use std::time::Duration;
+use std::{fs, process::Command};
 
 use chassis_daemon::{auth, tail};
 use chassis_telemetry_protocol::{ClientBody, ClientFrame, ServerBody, ServerFrame};
@@ -11,6 +12,50 @@ use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+#[tokio::test]
+async fn tail_binary_warns_only_for_command_line_token_and_connects() {
+    let mut h = Harness::start(Duration::from_secs(5)).await;
+    h.publish(1 << 20);
+    let url = format!("ws://{}/v1/ws", h.addr);
+    for explicit in [true, false] {
+        let stdout = tempfile::NamedTempFile::new().unwrap();
+        let stderr = tempfile::NamedTempFile::new().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chassis-daemon"));
+        cmd.args(["tail", "--url", &url])
+            .stdout(stdout.reopen().unwrap())
+            .stderr(stderr.reopen().unwrap())
+            .env("CHASSIS_TOKEN", &h.token);
+        if explicit {
+            cmd.args(["--token", &h.token]);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let connected = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if fs::read_to_string(stdout.path()).is_ok_and(|text| text.contains("host.sample"))
+                {
+                    return true;
+                }
+                if child.try_wait().ok().flatten().is_some() {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(connected, "tail did not receive a sample");
+        let warning = fs::read_to_string(stderr.path()).unwrap();
+        assert_eq!(
+            warning.contains("command-line arguments are visible to other users"),
+            explicit
+        );
+        assert!(!warning.contains(&h.token), "tail leaked the token");
+    }
+    h.shutdown().await;
+}
 
 #[tokio::test]
 async fn tail_prints_hello_snapshot_and_sample_lines() {

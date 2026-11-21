@@ -32,6 +32,61 @@ fn serve_with_malformed_pairing_exits_1() {
     let out = daemon(dir.path(), &["serve"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("malformed; run `chassis-daemon pair` again"));
+    assert!(stderr(&out).lines().any(|line| line.contains("ERROR")
+        && line.contains("token.sha256")
+        && line.contains("malformed")));
+}
+
+#[cfg(unix)]
+#[test]
+fn pair_tightens_existing_config_directory() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(daemon(dir.path(), &["pair"]).status.success());
+    assert_eq!(
+        fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_tightens_existing_config_directory_with_host_id() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    assert!(daemon(dir.path(), &["pair"]).status.success());
+    chassis_daemon::config::host_id(dir.path()).unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_chassis-daemon"))
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("CHASSIS_DAEMON_CONFIG_DIR", dir.path())
+        .stderr(log.reopen().unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let listening = loop {
+        if fs::read_to_string(log.path()).is_ok_and(|text| text.contains("listening on")) {
+            break true;
+        }
+        if Instant::now() >= deadline || server.try_wait().ok().flatten().is_some() {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = server.kill();
+    server.wait().unwrap();
+    assert!(listening, "daemon did not start");
+    assert_eq!(
+        fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
 }
 
 #[test]

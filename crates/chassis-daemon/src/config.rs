@@ -22,7 +22,7 @@ pub fn resolve_dir() -> Result<PathBuf, Error> {
     }
 }
 
-/// Create the config directory (and parents); mode 0700 on unix.
+/// Create the config directory (and parents), tightening it to 0700 on Unix.
 pub fn ensure_dir(dir: &Path) -> Result<(), Error> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -33,11 +33,19 @@ pub fn ensure_dir(dir: &Path) -> Result<(), Error> {
     }
     builder
         .create(dir)
-        .map_err(|e| Error::new(format!("cannot create {}: {e}", dir.display())))
+        .map_err(|e| Error::new(format!("cannot create {}: {e}", dir.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::new(format!("cannot set permissions on {}: {e}", dir.display())))?;
+    }
+    Ok(())
 }
 
 /// Return the stable host id stored in `<dir>/host-id`, generating it on first use.
 pub fn host_id(dir: &Path) -> Result<String, Error> {
+    ensure_dir(dir)?;
     let path = dir.join(HOST_ID_FILE);
     if let Ok(existing) = fs::read_to_string(&path) {
         let existing = existing.trim();
@@ -45,7 +53,6 @@ pub fn host_id(dir: &Path) -> Result<String, Error> {
             return Ok(existing.to_owned());
         }
     }
-    ensure_dir(dir)?;
     let id = generate_uuid_v4();
     fs::write(&path, format!("{id}\n"))
         .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
