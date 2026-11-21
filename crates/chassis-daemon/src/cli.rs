@@ -1,18 +1,25 @@
 //! Command line interface: argument parsing, serve guards, dispatch and exit codes.
 
 use std::fmt;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 use crate::auth::{self, TOKEN_HASH_FILE};
-use crate::config;
+use crate::{config, sampler, server};
 
 /// Smallest accepted sampling interval.
 pub const MIN_INTERVAL_MS: u32 = 250;
+
+/// How long a client has to authenticate after the upgrade.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A runtime refusal or failure, printed as `error: <message>`.
 #[derive(Debug)]
@@ -113,6 +120,52 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Run the server until Ctrl-C.
+fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
+    let host_id = config::host_id(&config_dir)?;
+    let interval = Duration::from_millis(u64::from(args.interval_ms));
+    let sampler = sampler::spawn(interval, host_id)?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::new(format!("cannot start the async runtime: {e}")))?;
+    let outcome = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind(args.bind)
+            .await
+            .map_err(|e| Error::new(format!("cannot bind {}: {e}", args.bind)))?;
+        let addr = listener.local_addr().unwrap_or(args.bind);
+        info!("listening on {addr}");
+        let config = server::ServerConfig {
+            config_dir,
+            info: Arc::new(sampler.info.clone()),
+            interval_ms: args.interval_ms,
+            auth_timeout: AUTH_TIMEOUT,
+        };
+        let ctrl_c = async {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::warn!("cannot listen for Ctrl-C: {e}");
+                std::future::pending::<()>().await;
+            }
+        };
+        server::serve(listener, config, sampler.samples.clone(), ctrl_c)
+            .await
+            .map_err(|e| Error::new(format!("server failed: {e}")))
+    });
+    sampler.stop();
+    outcome
+}
+
+fn init_logging(level: LevelFilter) {
+    // A second initialisation (in-process tests) is harmless.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_max_level(level)
+        .with_target(false)
+        .try_init();
+}
+
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
         Command::Pair => {
@@ -131,7 +184,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         Command::Serve(args) => {
             let dir = config::resolve_dir()?;
             check_serve(&args, &dir)?;
-            Err(Error::new("serve is not implemented yet"))
+            serve(&args, dir)
         }
         Command::Tail(_args) => Err(Error::new("tail is not implemented yet")),
     }
@@ -147,6 +200,11 @@ pub fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    let level = match &cli.command {
+        Command::Serve(args) => args.log_level,
+        _ => LevelFilter::WARN,
+    };
+    init_logging(level);
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
