@@ -35,7 +35,12 @@ which starts at 1 on each connection and increases by 1 per frame.
 | `_per_s` | Per second (e.g. tokens per second) |
 | `_minutes` | Minutes (rate-limit window length) |
 
-Integer values must not exceed 2^53 − 1.
+Integer values must not exceed 2^53 − 1. Numbers must be finite: a NaN or
+infinity serialises as `null` and fails validation.
+
+`top_processes[].cpu_pct` is a share of all logical CPUs, so it stays within
+0 to 100. One fully busy core reads `100 / hello.host.cpu_cores`; multiply by
+`cpu_cores` to get the per-core figure Activity Monitor and `top` show.
 
 ## Compatibility and provenance
 

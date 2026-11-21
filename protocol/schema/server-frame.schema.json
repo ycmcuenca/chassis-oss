@@ -592,7 +592,7 @@
           "type": "string"
         },
         "cpu_cores": {
-          "description": "Number of CPU cores.",
+          "description": "Number of logical CPUs. Per-process `cpu_pct` is a share of all of them.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -755,7 +755,7 @@
       "type": "object",
       "properties": {
         "cpu_pct": {
-          "description": "Process CPU usage as a percentage (0–100).",
+          "description": "Process CPU usage as a share of all logical CPUs (0–100). One fully busy\ncore reads `100 / hello.host.cpu_cores`.",
           "type": "number",
           "format": "double",
           "maximum": 100,

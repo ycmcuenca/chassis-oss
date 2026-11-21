@@ -110,7 +110,7 @@ pub struct HostIdentity {
     pub os_version: String,
     pub arch: String,
     pub cpu_brand: String,
-    /// Number of CPU cores.
+    /// Number of logical CPUs. Per-process `cpu_pct` is a share of all of them.
     pub cpu_cores: u32,
     /// Total host memory in bytes.
     #[serde(deserialize_with = "safe_integer")]
@@ -278,7 +278,8 @@ pub struct ProcessSample {
     /// OS process identifier.
     pub pid: u32,
     pub name: String,
-    /// Process CPU usage as a percentage (0–100).
+    /// Process CPU usage as a share of all logical CPUs (0–100). One fully busy
+    /// core reads `100 / hello.host.cpu_cores`.
     #[serde(deserialize_with = "percentage")]
     #[schemars(range(min = 0, max = 100))]
     pub cpu_pct: f64,

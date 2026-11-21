@@ -103,7 +103,7 @@ export interface HostIdentity {
   arch: string;
   cpu_brand: string;
   /**
-   * Number of CPU cores.
+   * Number of logical CPUs. Per-process `cpu_pct` is a share of all of them.
    */
   cpu_cores: number;
   hostname: string;
@@ -219,7 +219,8 @@ export interface NetworkInterfaceSample {
 }
 export interface ProcessSample {
   /**
-   * Process CPU usage as a percentage (0–100).
+   * Process CPU usage as a share of all logical CPUs (0–100). One fully busy
+   * core reads `100 / hello.host.cpu_cores`.
    */
   cpu_pct: number;
   /**
