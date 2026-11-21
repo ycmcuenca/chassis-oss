@@ -256,7 +256,7 @@ pub async fn run(
                 });
                 return match code {
                     CloseCode::Normal | CloseCode::Away => {
-                        emit(out, &format!("closed: {reason}"))?;
+                        emit(out, &format!("closed: {} {reason}", u16::from(code)))?;
                         Ok(())
                     }
                     other => Err(Error::new(format!(

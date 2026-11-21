@@ -84,6 +84,33 @@ async fn tail_prints_hello_snapshot_and_sample_lines() {
 }
 
 #[tokio::test]
+async fn tail_reports_the_shutdown_close_code() {
+    let mut h = Harness::start(Duration::from_secs(5)).await;
+    h.publish(1 << 20);
+    let url = format!("ws://{}/v1/ws", h.addr);
+    let token = h.token.clone();
+    let tail = tokio::spawn(async move {
+        let mut out: Vec<u8> = Vec::new();
+        let result = tail::run(&url, &token, &mut out, None).await;
+        (result, String::from_utf8(out).unwrap())
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    h.shutdown().await;
+
+    let (result, text) = tokio::time::timeout(Duration::from_secs(5), tail)
+        .await
+        .expect("tail did not finish")
+        .unwrap();
+    result.expect("a shutdown close is not an error");
+    assert!(
+        text.lines()
+            .last()
+            .is_some_and(|line| line.starts_with("closed: 1001")),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn tail_with_wrong_token_cannot_verify_the_host() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let url = format!("ws://{}/v1/ws", h.addr);
