@@ -13,7 +13,7 @@ use tracing::info;
 use tracing::level_filters::LevelFilter;
 
 use crate::auth::{self, TOKEN_HASH_FILE};
-use crate::{config, sampler, server};
+use crate::{config, sampler, server, tail};
 
 /// Smallest accepted sampling interval.
 pub const MIN_INTERVAL_MS: u32 = 250;
@@ -186,7 +186,18 @@ fn run(cli: Cli) -> Result<(), Error> {
             check_serve(&args, &dir)?;
             serve(&args, dir)
         }
-        Command::Tail(_args) => Err(Error::new("tail is not implemented yet")),
+        Command::Tail(args) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| Error::new(format!("cannot start the async runtime: {e}")))?;
+            runtime.block_on(tail::run(
+                &args.url,
+                &args.token,
+                &mut std::io::stdout(),
+                None,
+            ))
+        }
     }
 }
 

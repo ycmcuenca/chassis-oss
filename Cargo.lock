@@ -185,6 +185,7 @@ dependencies = [
  "hex",
  "macmon",
  "rand 0.10.4",
+ "serde",
  "serde_json",
  "sha2",
  "subtle",

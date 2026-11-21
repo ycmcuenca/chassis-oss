@@ -13,6 +13,18 @@ check:
     pnpm -r --if-present run typecheck
     pnpm -r --if-present run test
 
+# Pair a client: print a new token (invalidates the previous one)
+pair:
+    cargo run --release -q -p chassis-daemon -- pair
+
+# Run the daemon with debug logs (extra flags pass through, e.g. just daemon --interval-ms 500)
+daemon *ARGS:
+    cargo run --release -q -p chassis-daemon -- serve --log-level debug {{ARGS}}
+
+# Tail a running daemon (token from CHASSIS_TOKEN or --token)
+tail *ARGS:
+    cargo run --release -q -p chassis-daemon -- tail {{ARGS}}
+
 # Regenerate protocol schemas and TypeScript types
 protocol-gen:
     cargo run -q -p chassis-telemetry-protocol --example export-schema
