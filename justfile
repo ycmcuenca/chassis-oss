@@ -1,11 +1,11 @@
 default:
     @just --list
 
-# Format, lint, test and boundary-check everything in oss/
+# Format, lint, test and boundary-check. Refresh a stale Cargo.lock with cargo update --workspace.
 check:
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
+    cargo clippy --locked --workspace --all-targets -- -D warnings
+    cargo test --locked --workspace
     just protocol-drift
     node --test scripts/
     node scripts/check-boundary.mjs .
@@ -15,19 +15,19 @@ check:
 
 # Pair a client: print a new token (invalidates the previous one)
 pair:
-    cargo run --release -q -p chassis-daemon -- pair
+    cargo run --locked --release -q -p chassis-daemon -- pair
 
 # Run the daemon with debug logs (extra flags pass through, e.g. just daemon --interval-ms 500)
 daemon *ARGS:
-    cargo run --release -q -p chassis-daemon -- serve --log-level debug {{ARGS}}
+    cargo run --locked --release -q -p chassis-daemon -- serve --log-level debug {{ARGS}}
 
 # Tail a running daemon (token from CHASSIS_TOKEN or --token)
 tail *ARGS:
-    cargo run --release -q -p chassis-daemon -- tail {{ARGS}}
+    cargo run --locked --release -q -p chassis-daemon -- tail {{ARGS}}
 
 # Regenerate protocol schemas and TypeScript types
 protocol-gen:
-    cargo run -q -p chassis-telemetry-protocol --example export-schema
+    cargo run --locked -q -p chassis-telemetry-protocol --example export-schema
     pnpm --filter @chassis/telemetry-protocol run generate
 
 # Validate one JSON frame with both protocol implementations
@@ -36,7 +36,7 @@ protocol-validate FILE:
     file={{quote(join(invocation_directory(), FILE))}}
     rust_status=0
     ts_status=0
-    cargo run -q -p chassis-telemetry-protocol --example validate -- "$file" || rust_status=$?
+    cargo run --locked -q -p chassis-telemetry-protocol --example validate -- "$file" || rust_status=$?
     pnpm --filter @chassis/telemetry-protocol exec tsx scripts/validate.ts "$file" || ts_status=$?
     if [ "$rust_status" -ne 0 ]; then exit "$rust_status"; fi
     exit "$ts_status"
