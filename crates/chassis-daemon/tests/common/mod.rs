@@ -87,6 +87,8 @@ pub struct Harness {
     pub token: String,
     pub tx: SampleTx,
     pub dir: tempfile::TempDir,
+    pub marks: sampler::Liveness,
+    ended: watch::Sender<Option<String>>,
     stop: Option<oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
@@ -108,20 +110,45 @@ impl Harness {
         interval_ms: u32,
         auth_timeout: Duration,
     ) -> Harness {
+        Self::start_configured(dir, token, tx, rx, info, interval_ms, auth_timeout, |_| {}).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_configured(
+        dir: tempfile::TempDir,
+        token: String,
+        tx: SampleTx,
+        rx: sampler::SampleRx,
+        info: sampler::StaticInfo,
+        interval_ms: u32,
+        auth_timeout: Duration,
+        configure: impl FnOnce(&mut ServerConfig),
+    ) -> Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let config = ServerConfig {
+        let mut config = ServerConfig {
             config_dir: dir.path().to_path_buf(),
             info: Arc::new(info),
             interval_ms,
             auth_timeout,
+            ping_interval: server::PING_INTERVAL,
+            idle_timeout: server::IDLE_TIMEOUT,
+            send_timeout: server::SEND_TIMEOUT,
             connection_limit: server::CONNECTION_LIMIT,
             allowed_origins: Vec::new(),
         };
+        configure(&mut config);
+        let (ended, marks) = sampler::Liveness::new();
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = tokio::spawn(server::serve(listener, config, rx, async move {
-            let _ = stopped.await;
-        }));
+        let server = tokio::spawn(server::serve(
+            listener,
+            config,
+            rx,
+            marks.clone(),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         Harness {
             addr,
             token,
@@ -129,6 +156,8 @@ impl Harness {
             stop: Some(stop),
             server: Some(server),
             dir,
+            marks,
+            ended,
         }
     }
 
@@ -147,7 +176,17 @@ impl Harness {
     }
 
     pub fn publish(&self, n: u64) {
+        self.marks.published();
         self.tx.send_replace(Some(sample(n)));
+    }
+
+    pub async fn sampler_failure(&mut self) -> std::io::Error {
+        self.ended.send_replace(Some("test sampler stopped".into()));
+        tokio::time::timeout(STEP, self.server.take().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
     }
 
     /// Trigger shutdown and wait for `serve` to return.

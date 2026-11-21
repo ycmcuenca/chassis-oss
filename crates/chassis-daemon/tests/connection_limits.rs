@@ -33,6 +33,8 @@ struct Daemon {
     addr: SocketAddr,
     #[cfg(unix)]
     token: String,
+    #[cfg(unix)]
+    log_path: std::path::PathBuf,
 }
 
 impl Daemon {
@@ -53,19 +55,15 @@ impl Daemon {
         #[cfg(not(unix))]
         let mut command = std::process::Command::new(binary);
         command
-            .args([
-                "serve",
-                "--bind",
-                &addr.to_string(),
-                "--interval-ms",
-                "250",
-                "--log-level",
-                "warn",
-            ])
+            .args(["serve", "--bind", &addr.to_string(), "--interval-ms", "250"])
             .args(extra)
             .env("CHASSIS_DAEMON_CONFIG_DIR", dir.path())
             .env_remove("CHASSIS_TOKEN")
             .stdout(Stdio::null());
+        #[cfg(unix)]
+        let log_path = dir.path().join("daemon.log");
+        #[cfg(unix)]
+        command.stderr(std::fs::File::create(&log_path).unwrap());
         let child = command.spawn().unwrap();
         let mut daemon = Self {
             child,
@@ -73,6 +71,8 @@ impl Daemon {
             addr,
             #[cfg(unix)]
             token: _token,
+            #[cfg(unix)]
+            log_path,
         };
         timeout(STEP, async {
             while TcpStream::connect(addr).await.is_err() {
@@ -86,6 +86,40 @@ impl Daemon {
         .await
         .expect("daemon did not start");
         daemon
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigint_and_sigterm_close_clients_and_exit_successfully() {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let mut daemon = Daemon::start(&["--log-level", "info"]).await;
+        let mut ws = connect(daemon.addr, None).await.unwrap();
+        authenticate(&mut ws, &daemon.token).await;
+        assert_eq!(next_frame(&mut ws).await.seq, 2);
+        // SAFETY: this PID belongs to the child held by `daemon`.
+        assert_eq!(
+            unsafe { libc::kill(daemon.child.id().try_into().unwrap(), signal) },
+            0
+        );
+        let (_, code) = common::drain(&mut ws).await;
+        assert_eq!(code, Some(1001), "signal {signal}");
+        let status = timeout(STEP, async {
+            loop {
+                if let Some(status) = daemon.child.try_wait().unwrap() {
+                    break status;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.code(), Some(0), "signal {signal}");
+        assert!(
+            std::fs::read_to_string(&daemon.log_path)
+                .unwrap()
+                .contains("shutting down")
+        );
     }
 }
 

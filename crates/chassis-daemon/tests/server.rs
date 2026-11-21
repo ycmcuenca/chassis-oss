@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use chassis_daemon::{auth, sampler};
 use chassis_telemetry_protocol::{AvailabilityStatus, ErrorCode, PROTOCOL_MAJOR, ServerBody};
 use common::*;
-use futures_util::{SinkExt, future::join_all};
+use futures_util::{SinkExt, StreamExt, future::join_all};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -168,7 +168,15 @@ async fn repairing_takes_effect_without_restart() {
 
 #[tokio::test]
 async fn healthz_answers_ok_without_host_data() {
-    let h = Harness::start(Duration::from_secs(5)).await;
+    let h = liveness_harness(100).await;
+    assert_health(&h, 200, "ok").await;
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    assert_health(&h, 503, "sampler stalled").await;
+    h.publish(1);
+    assert_health(&h, 200, "ok").await;
+}
+
+async fn assert_health(h: &Harness, status: u16, expected: &str) {
     let mut stream = TcpStream::connect(h.addr).await.unwrap();
     stream
         .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -176,10 +184,119 @@ async fn healthz_answers_ok_without_host_data() {
         .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.starts_with(&format!("HTTP/1.1 {status} ")),
+        "{response}"
+    );
     let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    assert_eq!(body.trim(), "ok");
+    assert_eq!(body, expected);
     assert!(!response.contains("test-host"));
+}
+
+const PING: Duration = Duration::from_millis(80);
+const IDLE: Duration = Duration::from_millis(360);
+
+async fn liveness_harness(interval_ms: u32) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::pair(dir.path()).unwrap();
+    let (tx, rx) = watch::channel(None);
+    Harness::start_configured(
+        dir,
+        token,
+        tx,
+        rx,
+        static_info(),
+        interval_ms,
+        STEP,
+        |config| {
+            config.ping_interval = PING;
+            config.idle_timeout = IDLE;
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn responding_to_pings_keeps_the_socket_alive() {
+    let h = liveness_harness(50).await;
+    let mut ws = h.login().await;
+    next_frame(&mut ws).await;
+    next_frame(&mut ws).await;
+    let start = Instant::now();
+    for _ in 0..6 {
+        let message = tokio::time::timeout(PING * 2, ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(message, Message::Ping(_)));
+        // Tungstenite queued a Pong on read; flush it without waiting for another Ping.
+        ws.flush().await.unwrap();
+    }
+    assert!(start.elapsed() > IDLE);
+    h.publish(1);
+    assert_eq!(next_frame(&mut ws).await.seq, 4);
+}
+
+#[tokio::test]
+async fn short_socket_pause_replays_buffered_frames_in_order_and_with_original_times() {
+    let h = liveness_harness(50).await;
+    let mut ws = h.login().await;
+    next_frame(&mut ws).await;
+    let snapshot = next_frame(&mut ws).await;
+    // Four small synthetic samples fit comfortably in loopback buffers.
+    for n in 1..=4 {
+        h.publish(n);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let resumed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut previous = snapshot.ts_ms;
+    for n in 1..=4 {
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.seq, 3 + n);
+        assert!(frame.ts_ms >= previous);
+        assert!(resumed.saturating_sub(frame.ts_ms) >= (5 - n) * 40);
+        previous = frame.ts_ms;
+        assert!(
+            matches!(frame.body, ServerBody::HostSample(sample) if sample.memory.used_bytes == n)
+        );
+    }
+}
+
+#[tokio::test]
+async fn socket_paused_past_idle_window_gets_4408() {
+    let h = liveness_harness(50).await;
+    let mut ws = h.login().await;
+    next_frame(&mut ws).await;
+    next_frame(&mut ws).await;
+    h.publish(1);
+    tokio::time::sleep(IDLE + PING).await;
+    let (frames, code) = drain(&mut ws).await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(code, Some(4408));
+}
+
+#[tokio::test]
+async fn sampler_end_notifies_client_and_serve_returns_error() {
+    let mut h = liveness_harness(50).await;
+    let mut ws = h.login().await;
+    next_frame(&mut ws).await;
+    next_frame(&mut ws).await;
+    let error = h.sampler_failure().await;
+    let (frames, code) = drain(&mut ws).await;
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        frames[0].body,
+        ServerBody::Error {
+            code: ErrorCode::Internal,
+            ..
+        }
+    ));
+    assert_eq!(code, Some(1011));
+    assert_eq!(error.to_string(), "test sampler stopped");
 }
 
 #[tokio::test]

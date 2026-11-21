@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::Error as WsError;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{self, Role, TOKEN_HASH_FILE, TokenHash};
-use crate::sampler::{SampleRx, StaticInfo};
+use crate::sampler::{Liveness, SampleRx, StaticInfo};
 
 /// Close code: authentication failed (bad or missing token, or no hello in time).
 const CLOSE_AUTH_FAILED: u16 = 4401;
@@ -50,6 +50,26 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_SIZE_LIMIT: usize = 16 * 1024;
 pub const CONNECTION_LIMIT: usize = 64;
+pub const PING_INTERVAL: Duration = Duration::from_secs(15);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const CLOSE_STALLED: u16 = 4408;
+
+async fn send<T: Sink<Message> + Unpin>(
+    tx: &mut T,
+    frame: Message,
+    limit: Duration,
+) -> Result<(), Stop> {
+    match tokio::time::timeout(limit, tx.send(frame)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(Stop::SinkFailed),
+        Err(_) => Err(Stop::SendTimeout),
+    }
+}
+
+async fn close<T: Sink<Message> + Unpin>(tx: &mut T, code: u16, reason: &str, limit: Duration) {
+    let _ = send(tx, close_message(code, reason), limit.min(CLOSE_TIMEOUT)).await;
+}
 
 const AGENTS_UNAVAILABLE: &str = "agent adapters not installed";
 
@@ -62,6 +82,9 @@ pub struct ServerConfig {
     pub interval_ms: u32,
     /// How long a client has to complete authentication after the upgrade.
     pub auth_timeout: Duration,
+    pub ping_interval: Duration,
+    pub idle_timeout: Duration,
+    pub send_timeout: Duration,
     pub connection_limit: usize,
     pub allowed_origins: Vec<String>,
 }
@@ -70,6 +93,7 @@ pub struct ServerConfig {
 struct AppState {
     config: Arc<ServerConfig>,
     samples: SampleRx,
+    liveness: Liveness,
     shutdown: watch::Receiver<bool>,
     /// Held by every WebSocket task so `serve` can wait for them to finish.
     alive: mpsc::Sender<()>,
@@ -77,14 +101,20 @@ struct AppState {
 }
 
 /// Build the router. Serve it with `into_make_service_with_connect_info::<SocketAddr>()`.
-pub fn router(config: ServerConfig, samples: SampleRx, shutdown: watch::Receiver<bool>) -> Router {
+pub fn router(
+    config: ServerConfig,
+    samples: SampleRx,
+    liveness: Liveness,
+    shutdown: watch::Receiver<bool>,
+) -> Router {
     let (alive, _) = mpsc::channel(1);
-    build(config, samples, shutdown, alive)
+    build(config, samples, liveness, shutdown, alive)
 }
 
 fn build(
     config: ServerConfig,
     samples: SampleRx,
+    liveness: Liveness,
     shutdown: watch::Receiver<bool>,
     alive: mpsc::Sender<()>,
 ) -> Router {
@@ -92,13 +122,22 @@ fn build(
         permits: Arc::new(Semaphore::new(config.connection_limit)),
         config: Arc::new(config),
         samples,
+        liveness,
         shutdown,
         alive,
     };
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/healthz", get(health))
         .route("/v1/ws", get(ws_upgrade))
         .with_state(state)
+}
+
+async fn health(State(state): State<AppState>) -> (StatusCode, &'static str) {
+    if state.liveness.healthy(state.config.interval_ms) {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "sampler stalled")
+    }
 }
 
 /// Serve until `shutdown` resolves, then close every WebSocket with 1001 and return.
@@ -106,20 +145,23 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     config: ServerConfig,
     samples: SampleRx,
+    liveness: Liveness,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let (flag_tx, flag_rx) = watch::channel(false);
     let (alive, mut alive_rx) = mpsc::channel::<()>(1);
-    let app = build(config, samples, flag_rx.clone(), alive);
+    let mut ended = liveness.ended.clone();
+    let app = build(config, samples, liveness, flag_rx.clone(), alive);
     let mut shutdown = pin!(shutdown);
     let mut tasks = JoinSet::new();
     let mut http = hyper::server::conn::http1::Builder::new();
     http.timer(TokioTimer::new())
         .header_read_timeout(HEADER_TIMEOUT);
-    loop {
+    let failure = loop {
         tokio::select! {
             biased;
-            () = &mut shutdown => break,
+            reason = sampler_ended(&mut ended) => break Some(reason),
+            () = &mut shutdown => break None,
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             accepted = listener.accept() => {
                 let (socket, peer) = match accepted {
@@ -148,21 +190,41 @@ pub async fn serve(
                 });
             }
         }
+    };
+    if let Some(reason) = &failure {
+        error!(%reason, "shutting down after sampler failure");
+    } else {
+        info!("shutting down");
     }
-    info!("shutting down");
     drop(listener);
     let _ = flag_tx.send(true);
     drop(app);
     let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
         while tasks.join_next().await.is_some() {}
+        // Upgraded connections are detached from hyper.
+        alive_rx.recv().await;
     })
     .await;
-    drop(tasks);
-    // Upgraded connections are detached from hyper: wait for their tasks to send Close.
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, alive_rx.recv()).await;
-    Ok(())
+    failure.map_or(Ok(()), |reason| Err(std::io::Error::other(reason)))
 }
 
+async fn sampler_ended(ended: &mut watch::Receiver<Option<String>>) -> String {
+    match ended.wait_for(Option::is_some).await {
+        Ok(reason) => reason.as_ref().unwrap().clone(),
+        Err(_) => "sampler status channel closed".into(),
+    }
+}
+
+async fn daemon_stop(state: &AppState) -> Stop {
+    let mut ended = state.liveness.ended.clone();
+    let mut shutdown = state.shutdown.clone();
+    tokio::select! {
+        biased;
+        _ = sampler_ended(&mut ended) => Stop::SamplerEnded,
+        // A dropped sender also means the daemon is going away.
+        _ = shutdown.wait_for(|down| *down) => Stop::Shutdown,
+    }
+}
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -239,6 +301,7 @@ enum Reject {
     ProtocolMismatch,
     Internal,
     TooLarge,
+    SendTimeout,
     Gone,
 }
 
@@ -251,6 +314,7 @@ impl Reject {
             Reject::ProtocolMismatch => "protocol mismatch",
             Reject::Internal => "internal",
             Reject::TooLarge => "message too large",
+            Reject::SendTimeout => "send timeout",
             Reject::Gone => "disconnected",
         }
     }
@@ -283,7 +347,9 @@ impl Reject {
                 "pairing is unavailable".to_string(),
                 1011,
             ),
-            Reject::Gone | Reject::TooLarge => unreachable!("no error frame for this rejection"),
+            Reject::Gone | Reject::TooLarge | Reject::SendTimeout => {
+                unreachable!("no error frame for this rejection")
+            }
         }
     }
 }
@@ -322,6 +388,7 @@ async fn handshake(
     rx: &mut (impl Stream<Item = Result<Message, axum::Error>> + Unpin),
     seq: &mut u64,
     config_dir: PathBuf,
+    send_timeout: Duration,
 ) -> Result<ClientIdentity, Reject> {
     let ClientBody::Hello { nonce, client, .. } = auth_frame(rx).await? else {
         return Err(Reject::Malformed);
@@ -352,9 +419,15 @@ async fn handshake(
         },
     )
     .ok_or(Reject::Internal)?;
-    tx.send(Message::Text(challenge.into()))
+    send(tx, Message::Text(challenge.into()), send_timeout)
         .await
-        .map_err(|_| Reject::Gone)?;
+        .map_err(|err| {
+            if err == Stop::SendTimeout {
+                Reject::SendTimeout
+            } else {
+                Reject::Gone
+            }
+        })?;
 
     let ClientBody::Auth { proof } = auth_frame(rx).await? else {
         return Err(Reject::Malformed);
@@ -378,27 +451,47 @@ async fn handle_socket(socket: WebSocket, peer: SocketAddr, state: AppState) {
     let deadline = Instant::now() + state.config.auth_timeout;
     let (mut tx, mut rx) = socket.split();
     let mut seq = 0u64;
+    let limit = state.config.send_timeout;
 
-    let verdict = tokio::time::timeout_at(
+    let auth = tokio::time::timeout_at(
         deadline,
-        handshake(&mut tx, &mut rx, &mut seq, state.config.config_dir.clone()),
-    )
-    .await
-    .unwrap_or(Err(Reject::Timeout));
+        handshake(
+            &mut tx,
+            &mut rx,
+            &mut seq,
+            state.config.config_dir.clone(),
+            limit,
+        ),
+    );
+    let verdict = tokio::select! {
+        biased;
+        outcome = daemon_stop(&state) => {
+            finish(&mut tx, &mut seq, outcome, limit, peer).await;
+            return;
+        }
+        result = auth => result.unwrap_or(Err(Reject::Timeout)),
+    };
     match verdict {
         Err(Reject::Gone) => {}
+        Err(Reject::SendTimeout) => close(&mut tx, CLOSE_STALLED, "send timed out", limit).await,
         Err(Reject::TooLarge) => {
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, tx.send(close_message(1009, ""))).await;
+            close(&mut tx, 1009, "", limit).await;
         }
         Err(reject) => {
             warn!(%peer, reason = reject.category(), "authentication failed");
             let (code, message, close) = reject.response();
             if let Some(text) = encode(&mut seq, ServerBody::Error { code, message }) {
-                let reject_send = async {
-                    let _ = tx.send(Message::Text(text.into())).await;
-                    let _ = tx.send(close_message(close, "")).await;
-                };
-                let _ = tokio::time::timeout(CLOSE_TIMEOUT, reject_send).await;
+                let result = send(
+                    &mut tx,
+                    Message::Text(text.into()),
+                    limit.min(CLOSE_TIMEOUT),
+                )
+                .await;
+                if result == Err(Stop::SendTimeout) {
+                    self::close(&mut tx, CLOSE_STALLED, "send timed out", limit).await;
+                } else {
+                    self::close(&mut tx, close, "", limit).await;
+                }
             }
         }
         Ok(client) => {
@@ -408,7 +501,7 @@ async fn handle_socket(socket: WebSocket, peer: SocketAddr, state: AppState) {
                 version = ?loggable(&client.version),
                 "authenticated"
             );
-            session(&mut tx, &mut rx, &mut seq, &state).await;
+            session(&mut tx, &mut rx, &mut seq, &state, peer).await;
         }
     }
     info!(%peer, frames_sent = seq, "disconnected");
@@ -445,7 +538,7 @@ fn hello(config: &ServerConfig) -> ServerBody {
 }
 
 /// An authenticated connection: hello, snapshot, then samples until something ends it.
-async fn session<T, R>(tx: &mut T, rx: &mut R, seq: &mut u64, state: &AppState)
+async fn session<T, R>(tx: &mut T, rx: &mut R, seq: &mut u64, state: &AppState, peer: SocketAddr)
 where
     T: Sink<Message> + Unpin,
     R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -454,52 +547,100 @@ where
     // Start with whatever the sampler published last, instead of waiting a full interval.
     samples.mark_changed();
 
-    let mut shutdown = state.shutdown.clone();
     let stop = async {
         tokio::select! {
-            // A dropped sender also means the daemon is going away.
-            _ = shutdown.wait_for(|down| *down) => Stop::Shutdown,
-            () = until_client_gone(rx) => Stop::ClientGone,
+            biased;
+            outcome = daemon_stop(state) => outcome,
+            outcome = read_until_idle(rx, state.config.idle_timeout) => outcome,
         }
     };
     let mut stop = pin!(stop);
-
-    let mut text_tx = (&mut *tx).with(|text: String| {
-        futures_util::future::ready(Ok::<_, T::Error>(Message::Text(text.into())))
-    });
-    for body in [
+    let mut initial = [
         hello(&state.config),
         ServerBody::AgentsSnapshot { sessions: vec![] },
-    ] {
-        let Some(text) = encode(seq, body) else {
-            return;
+    ]
+    .into_iter();
+    let mut pings = tokio::time::interval_at(
+        Instant::now() + state.config.ping_interval,
+        state.config.ping_interval,
+    );
+    pings.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let limit = state.config.send_timeout;
+    let outcome = loop {
+        let frame = if let Some(body) = initial.next() {
+            let Some(text) = encode(seq, body) else {
+                break Stop::SinkFailed;
+            };
+            Message::Text(text.into())
+        } else {
+            tokio::select! {
+                biased;
+                reason = &mut stop => break reason,
+                _ = pings.tick() => Message::Ping(Default::default()),
+                changed = samples.changed() => {
+                    if changed.is_err() {
+                        break Stop::SamplerEnded;
+                    }
+                    let Some(sample) = samples.borrow_and_update().clone() else { continue };
+                    let Some(text) = encode(seq, ServerBody::HostSample((*sample).clone())) else {
+                        continue;
+                    };
+                    Message::Text(text.into())
+                }
+            }
         };
-        let sent = tokio::select! {
-            sent = text_tx.send(text) => sent.is_ok(),
-            _ = &mut stop => false,
-        };
-        if !sent {
-            return;
+        tokio::select! {
+            biased;
+            reason = &mut stop => break reason,
+            result = send(tx, frame, limit) => if let Err(reason) = result { break reason },
         }
-    }
+    };
+    finish(tx, seq, outcome, limit, peer).await;
+}
 
-    let outcome = pump(&mut text_tx, &mut samples, seq, &mut stop).await;
-    drop(text_tx);
-    if outcome == Stop::Shutdown {
-        let close = tx.send(close_message(CLOSE_GOING_AWAY, "daemon shutting down"));
-        let _ = tokio::time::timeout(CLOSE_TIMEOUT, close).await;
+async fn finish<T: Sink<Message> + Unpin>(
+    tx: &mut T,
+    seq: &mut u64,
+    outcome: Stop,
+    limit: Duration,
+    peer: SocketAddr,
+) {
+    match outcome {
+        Stop::Shutdown => close(tx, CLOSE_GOING_AWAY, "daemon shutting down", limit).await,
+        Stop::Idle => close(tx, CLOSE_STALLED, "heartbeat timed out", limit).await,
+        Stop::SendTimeout => {
+            debug!(%peer, "socket send timed out");
+            close(tx, CLOSE_STALLED, "send timed out", limit).await;
+        }
+        Stop::SamplerEnded => {
+            if let Some(text) = encode(
+                seq,
+                ServerBody::Error {
+                    code: ErrorCode::Internal,
+                    message: "sampler stopped".into(),
+                },
+            ) && send(tx, Message::Text(text.into()), limit.min(CLOSE_TIMEOUT)).await
+                == Err(Stop::SendTimeout)
+            {
+                close(tx, CLOSE_STALLED, "send timed out", limit).await;
+                return;
+            }
+            close(tx, 1011, "sampler stopped", limit).await;
+        }
+        Stop::ClientGone | Stop::SinkFailed => {}
     }
 }
 
-/// Returns when the peer closes or the socket fails; everything else it sends is ignored.
-async fn until_client_gone<R>(rx: &mut R)
+/// Each received frame, including a Pong, restarts the idle window.
+async fn read_until_idle<R>(rx: &mut R, idle: Duration) -> Stop
 where
     R: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
     loop {
-        match rx.next().await {
-            None | Some(Err(_) | Ok(Message::Close(_))) => return,
-            Some(Ok(_)) => {}
+        match tokio::time::timeout(idle, rx.next()).await {
+            Err(_) => return Stop::Idle,
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return Stop::ClientGone,
+            Ok(Some(Ok(_))) => {}
         }
     }
 }
@@ -510,48 +651,46 @@ enum Stop {
     ClientGone,
     SamplerEnded,
     SinkFailed,
-}
-
-/// Send one `host.sample` frame per published sample until `stop` resolves.
-///
-/// A slow sink only ever delays this connection: the watch channel keeps the latest value, so
-/// when the sink catches up the next frame is the newest sample, not a backlog.
-async fn pump<S, F>(sink: &mut S, samples: &mut SampleRx, seq: &mut u64, stop: &mut F) -> Stop
-where
-    S: Sink<String> + Unpin,
-    F: Future<Output = Stop> + Unpin,
-{
-    loop {
-        tokio::select! {
-            reason = &mut *stop => return reason,
-            changed = samples.changed() => {
-                if changed.is_err() {
-                    return Stop::SamplerEnded;
-                }
-                let Some(sample) = samples.borrow_and_update().clone() else { continue };
-                let Some(text) = encode(seq, ServerBody::HostSample((*sample).clone())) else {
-                    continue;
-                };
-                tokio::select! {
-                    sent = sink.send(text) => {
-                        if sent.is_err() {
-                            return Stop::SinkFailed;
-                        }
-                    }
-                    reason = &mut *stop => return reason,
-                }
-            }
-        }
-    }
+    Idle,
+    SendTimeout,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chassis_telemetry_protocol::{
-        CpuSample, DiskSample, HostSample, MemorySample, NetworkSample,
+        Availability, CpuSample, DiskSample, HostIdentity, HostSample, MemorySample,
+        MetricCapabilities, NetworkSample,
     };
-    use std::sync::Mutex;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    fn static_info() -> StaticInfo {
+        let unavailable = Availability {
+            status: AvailabilityStatus::Unavailable,
+            reason: None,
+        };
+        StaticInfo {
+            host: HostIdentity {
+                id: "11111111-1111-4111-8111-111111111111".into(),
+                hostname: "test-host".into(),
+                os_name: "test".into(),
+                os_version: "1".into(),
+                arch: "test".into(),
+                cpu_brand: "test".into(),
+                cpu_cores: 1,
+                memory_total_bytes: 2,
+            },
+            metrics: MetricCapabilities {
+                memory_pressure: None,
+                gpu_usage: unavailable.clone(),
+                gpu_memory: unavailable.clone(),
+                gpu_power: unavailable.clone(),
+                gpu_freq: unavailable.clone(),
+                temperatures: unavailable,
+            },
+        }
+    }
 
     fn sample(n: u64) -> HostSample {
         HostSample {
@@ -582,57 +721,111 @@ mod tests {
         }
     }
 
+    struct TestSink {
+        stall: bool,
+        stalled: bool,
+        frames: mpsc::UnboundedSender<Message>,
+    }
+
+    impl Sink<Message> for TestSink {
+        type Error = std::convert::Infallible;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
+            self.stalled = self.stall
+                && matches!(&frame, Message::Text(text) if text.contains("\"type\":\"host.sample\""));
+            let _ = self.frames.send(frame);
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.stalled {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
     #[tokio::test]
-    async fn slow_sink_skips_to_the_latest_sample() {
-        let (tx, mut rx) = watch::channel(None);
-        let received: Arc<Mutex<Vec<String>>> = Arc::default();
-        let log = received.clone();
-        let mut sink = Box::pin(futures_util::sink::unfold((), move |(), text: String| {
-            let log = log.clone();
-            async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                log.lock().unwrap().push(text);
-                Ok::<_, std::convert::Infallible>(())
+    async fn blocked_flush_times_out_without_delaying_second_session() {
+        let (publish, samples) = watch::channel(None);
+        let (_ended, liveness) = Liveness::new();
+        let (_shutdown, shutdown) = watch::channel(false);
+        let (alive, _) = mpsc::channel(1);
+        let state = AppState {
+            config: Arc::new(ServerConfig {
+                config_dir: PathBuf::new(),
+                info: Arc::new(static_info()),
+                interval_ms: 20,
+                auth_timeout: Duration::from_secs(1),
+                ping_interval: PING_INTERVAL,
+                idle_timeout: IDLE_TIMEOUT,
+                send_timeout: Duration::from_millis(150),
+                connection_limit: 2,
+                allowed_origins: vec![],
+            }),
+            samples,
+            liveness,
+            shutdown,
+            alive,
+            permits: Arc::new(Semaphore::new(2)),
+        };
+        let start = |stall| {
+            let state = state.clone();
+            let (frames, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                let mut sink = TestSink {
+                    stall,
+                    stalled: false,
+                    frames,
+                };
+                session(
+                    &mut sink,
+                    &mut futures_util::stream::pending(),
+                    &mut 0,
+                    &state,
+                    "127.0.0.1:1".parse().unwrap(),
+                )
+                .await;
+            });
+            (rx, task)
+        };
+        let (mut slow, slow_task) = start(true);
+        let (mut fast, fast_task) = start(false);
+        for rx in [&mut slow, &mut fast] {
+            for _ in 0..2 {
+                assert!(matches!(rx.recv().await, Some(Message::Text(_))));
             }
-        }));
-
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let publisher = tokio::spawn(async move {
-            for n in 1..=10u64 {
-                tx.send_replace(Some(Arc::new(sample(n))));
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            // Let the sink drain the newest sample before stopping.
-            tokio::time::sleep(Duration::from_millis(800)).await;
-            let _ = stop_tx.send(());
-            tx
-        });
-        let mut stop = pin!(async move {
-            let _ = stop_rx.await;
-            Stop::ClientGone
-        });
-
-        let mut seq = 0;
-        let outcome = pump(&mut sink, &mut rx, &mut seq, &mut stop).await;
-        let _tx = publisher.await.unwrap();
-        assert_eq!(outcome, Stop::ClientGone);
-
-        let frames: Vec<ServerFrame> = received
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|t| ServerFrame::parse_lenient(t).unwrap())
-            .collect();
-        assert!(frames.len() < 10, "sent {} frames", frames.len());
-        assert!(frames.len() >= 2);
-        assert!(frames.windows(2).all(|w| w[0].seq < w[1].seq));
-        let used: Vec<u64> = frames
-            .iter()
-            .map(|f| match &f.body {
-                ServerBody::HostSample(s) => s.memory.used_bytes,
-                other => panic!("unexpected {other:?}"),
-            })
-            .collect();
-        assert_eq!(used.last(), Some(&10));
+        }
+        let started = Instant::now();
+        for n in 1..=10 {
+            publish.send_replace(Some(Arc::new(sample(n))));
+            let frame = tokio::time::timeout(Duration::from_millis(100), fast.recv())
+                .await
+                .unwrap();
+            let Some(Message::Text(frame)) = frame else {
+                panic!("expected sample");
+            };
+            assert_eq!(ServerFrame::parse_lenient(&frame).unwrap().seq, n + 2);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(matches!(slow.recv().await, Some(Message::Text(_))));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), slow.recv())
+                .await
+                .unwrap(),
+            Some(Message::Close(Some(CloseFrame { code: 4408, .. })))
+        ));
+        slow_task.await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        fast_task.abort();
     }
 }

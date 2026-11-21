@@ -120,7 +120,7 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run the server until Ctrl-C.
+/// Run the server until a shutdown signal or sampler failure.
 fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
     #[cfg(unix)]
     match raise_nofile() {
@@ -146,6 +146,9 @@ fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
             info: Arc::new(sampler.info.clone()),
             interval_ms: args.interval_ms,
             auth_timeout: AUTH_TIMEOUT,
+            ping_interval: server::PING_INTERVAL,
+            idle_timeout: server::IDLE_TIMEOUT,
+            send_timeout: server::SEND_TIMEOUT,
             connection_limit: server::CONNECTION_LIMIT,
             allowed_origins: args.allow_origin.clone(),
         };
@@ -155,9 +158,28 @@ fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
                 std::future::pending::<()>().await;
             }
         };
-        server::serve(listener, config, sampler.samples.clone(), ctrl_c)
-            .await
-            .map_err(|e| Error::new(format!("server failed: {e}")))
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| Error::new(format!("cannot listen for SIGTERM: {e}")))?;
+        let shutdown = async move {
+            #[cfg(unix)]
+            tokio::select! {
+                () = ctrl_c => {},
+                _ = terminate.recv() => {},
+            }
+            #[cfg(not(unix))]
+            ctrl_c.await;
+        };
+        server::serve(
+            listener,
+            config,
+            sampler.samples.clone(),
+            sampler.liveness.clone(),
+            shutdown,
+        )
+        .await
+        .map_err(|e| Error::new(format!("server failed: {e}")))
     });
     sampler.stop();
     outcome

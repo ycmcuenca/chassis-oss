@@ -32,10 +32,76 @@ pub struct StaticInfo {
 /// Receiver of the latest sample; `None` until the first one is published.
 pub type SampleRx = watch::Receiver<Option<Arc<HostSample>>>;
 
+/// Sampler status is independent of the latest-value telemetry channel.
+#[derive(Clone)]
+pub struct Liveness {
+    pub ended: watch::Receiver<Option<String>>,
+    started: Instant,
+    last_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Liveness {
+    pub fn new() -> (watch::Sender<Option<String>>, Self) {
+        let (tx, ended) = watch::channel(None);
+        (
+            tx,
+            Self {
+                ended,
+                started: Instant::now(),
+                last_ms: Arc::default(),
+            },
+        )
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn published(&self) {
+        self.last_ms
+            .store(self.elapsed_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn healthy(&self, interval_ms: u32) -> bool {
+        self.elapsed_ms()
+            .saturating_sub(self.last_ms.load(std::sync::atomic::Ordering::Relaxed))
+            < u64::from(interval_ms) * 3
+    }
+}
+
+struct PublishEnd {
+    tx: watch::Sender<Option<String>>,
+    reason: String,
+}
+
+impl PublishEnd {
+    fn run(mut self, sample: impl FnOnce() + std::panic::UnwindSafe) {
+        if let Err(payload) = std::panic::catch_unwind(sample) {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic payload");
+            self.reason = format!("sampler thread panicked: {message}");
+        }
+    }
+}
+
+impl Drop for PublishEnd {
+    fn drop(&mut self) {
+        self.tx.send_replace(Some(std::mem::take(&mut self.reason)));
+    }
+}
+
 /// A running sampler thread and its published samples.
 pub struct SamplerHandle {
     pub info: StaticInfo,
     pub samples: SampleRx,
+    pub liveness: Liveness,
     stop_tx: mpsc::Sender<()>,
     join: JoinHandle<()>,
 }
@@ -58,24 +124,34 @@ pub fn spawn(interval: Duration, host_id: String) -> Result<SamplerHandle, Error
     let (tx, samples) = watch::channel(None);
     let (init_tx, init_rx) = mpsc::channel::<Result<StaticInfo, String>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (ended, liveness) = Liveness::new();
+    let marks = liveness.clone();
 
     let join = std::thread::Builder::new()
         .name("chassis-sampler".to_string())
-        .spawn(move || match Sources::init(host_id) {
-            Ok((sources, info)) => {
-                if init_tx.send(Ok(info)).is_ok() {
-                    run(sources, interval, &tx, &stop_rx);
+        .spawn(move || {
+            let guard = PublishEnd {
+                tx: ended,
+                reason: "sampler thread stopped".into(),
+            };
+            guard.run(|| match Sources::init(host_id) {
+                Ok((sources, info)) => {
+                    marks.published();
+                    if init_tx.send(Ok(info)).is_ok() {
+                        run(sources, interval, &tx, &stop_rx, &marks);
+                    }
                 }
-            }
-            Err(message) => {
-                let _ = init_tx.send(Err(message));
-            }
+                Err(message) => {
+                    let _ = init_tx.send(Err(message));
+                }
+            });
         })?;
 
     match init_rx.recv() {
         Ok(Ok(info)) => Ok(SamplerHandle {
             info,
             samples,
+            liveness,
             stop_tx,
             join,
         }),
@@ -126,6 +202,7 @@ fn run(
     interval: Duration,
     tx: &watch::Sender<Option<Arc<HostSample>>>,
     stop_rx: &mpsc::Receiver<()>,
+    marks: &Liveness,
 ) {
     let mut next = Instant::now() + interval;
     loop {
@@ -135,7 +212,9 @@ fn run(
             // A message or a dropped handle both mean stop.
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        tx.send_replace(Some(Arc::new(sources.tick())));
+        let sample = Arc::new(sources.tick());
+        tx.send_replace(Some(sample));
+        marks.published();
         next += interval;
         let now = Instant::now();
         if next <= now {
@@ -401,4 +480,21 @@ mod tests {
             "measured {measured}, expected {expected} ±25%"
         );
     }
+}
+#[test]
+fn sampler_end_guard_reports_panic_reason() {
+    let (tx, status) = Liveness::new();
+    std::thread::spawn(move || {
+        PublishEnd {
+            tx,
+            reason: "sampler thread stopped".into(),
+        }
+        .run(|| panic!("synthetic sampler panic"));
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        status.ended.borrow().as_deref(),
+        Some("sampler thread panicked: synthetic sampler panic")
+    );
 }
