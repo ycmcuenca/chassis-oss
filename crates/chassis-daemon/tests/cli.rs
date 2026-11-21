@@ -35,15 +35,20 @@ fn serve_with_malformed_pairing_exits_1() {
 }
 
 #[test]
-fn serve_non_loopback_without_flag_exits_1() {
+fn serve_non_loopback_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     let out = daemon(dir.path(), &["serve", "--bind", "0.0.0.0:7317"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(
-        stderr(&out).contains("--allow-non-loopback"),
-        "{}",
-        stderr(&out)
-    );
+    assert!(stderr(&out).contains("Tailscale Serve"), "{}", stderr(&out));
+}
+
+#[test]
+fn removed_bind_override_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let removed = ["--allow", "non", "loopback"].join("-");
+    let out = daemon(dir.path(), &["serve", &removed]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("unexpected argument"));
 }
 
 #[test]

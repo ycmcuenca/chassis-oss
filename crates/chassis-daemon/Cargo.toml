@@ -20,6 +20,8 @@ directories = "6.0"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.13"
+hyper = { version = "=1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "service"] }
 rand = "0.10"
 serde = "1"
 serde_json = "1"
@@ -29,6 +31,9 @@ tokio = { version = "1.54", features = ["macros", "net", "rt-multi-thread", "sig
 tokio-tungstenite = "0.29"
 tracing = "0.1.44"
 tracing-subscriber = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 macmon = { version = "0.12", default-features = false }

@@ -32,7 +32,7 @@ chassis-daemon serve       # or: just daemon
 | Flag                    | Default          | Meaning                                         |
 | ----------------------- | ---------------- | ----------------------------------------------- |
 | `--bind <ADDR>`         | `127.0.0.1:7317` | Address to listen on                            |
-| `--allow-non-loopback`  | off              | Allow binding an address that is not loopback   |
+| `--allow-origin <ORIGIN>` | none           | Allow this exact browser Origin (repeatable)    |
 | `--interval-ms <MS>`    | `1000`           | Sampling interval, at least `250`               |
 | `--log-level <LEVEL>`   | `info`           | `off`, `error`, `warn`, `info`, `debug`, `trace` |
 
@@ -40,7 +40,7 @@ chassis-daemon serve       # or: just daemon
 example `just daemon --interval-ms 500`.
 
 `serve` refuses to start if no token has been paired, if the interval is below
-250, or if the address is not loopback and `--allow-non-loopback` is missing.
+250, or if the address is not loopback.
 Press Ctrl-C to stop it. Connected clients are closed with code 1001.
 
 The server answers `GET /healthz` with `ok` and no host data. Clients connect to
@@ -82,13 +82,10 @@ Set `CHASSIS_DAEMON_CONFIG_DIR` to use another directory.
 
 ### Security notes
 
-- The daemon listens on loopback only by default.
-- Loopback is not a guard on its own: a web page open on the same machine can
-  open a WebSocket to `127.0.0.1`. The token is the real protection.
+- The daemon listens on loopback only. For remote access, put Tailscale Serve in front of it.
+- Browser origins are refused unless explicitly allowed with `--allow-origin`.
 - Treat the token like a password. Do not commit it or paste it into chat or
   issues. Clear your terminal scrollback after `pair`.
-- `--allow-non-loopback` exists for the later Tailscale work. Do not expose the
-  port on an untrusted network: the connection is not encrypted.
 
 Run `just check` from this directory to format-check, lint, and test the workspace.
 

@@ -1,5 +1,6 @@
 //! WebSocket server: `/healthz`, and `/v1/ws` with mutual authentication.
 
+use std::error::Error as _;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -7,11 +8,12 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, header::ORIGIN};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chassis_telemetry_protocol::{
     AgentCapability, AgentKind, AvailabilityStatus, Capabilities, ClientBody, ClientFrame,
@@ -19,8 +21,14 @@ use chassis_telemetry_protocol::{
     ServerFrame, check_protocol_version,
 };
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
-use tokio::sync::{mpsc, watch};
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    service::TowerToHyperService,
+};
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::{self, Role, TOKEN_HASH_FILE, TokenHash};
@@ -39,6 +47,9 @@ const CLOSE_GOING_AWAY: u16 = 1001;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long `serve` waits for open WebSocket tasks after shutdown.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_SIZE_LIMIT: usize = 16 * 1024;
+pub const CONNECTION_LIMIT: usize = 64;
 
 const AGENTS_UNAVAILABLE: &str = "agent adapters not installed";
 
@@ -51,6 +62,8 @@ pub struct ServerConfig {
     pub interval_ms: u32,
     /// How long a client has to complete authentication after the upgrade.
     pub auth_timeout: Duration,
+    pub connection_limit: usize,
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -60,6 +73,7 @@ struct AppState {
     shutdown: watch::Receiver<bool>,
     /// Held by every WebSocket task so `serve` can wait for them to finish.
     alive: mpsc::Sender<()>,
+    permits: Arc<Semaphore>,
 }
 
 /// Build the router. Serve it with `into_make_service_with_connect_info::<SocketAddr>()`.
@@ -75,6 +89,7 @@ fn build(
     alive: mpsc::Sender<()>,
 ) -> Router {
     let state = AppState {
+        permits: Arc::new(Semaphore::new(config.connection_limit)),
         config: Arc::new(config),
         samples,
         shutdown,
@@ -95,15 +110,54 @@ pub async fn serve(
 ) -> std::io::Result<()> {
     let (flag_tx, flag_rx) = watch::channel(false);
     let (alive, mut alive_rx) = mpsc::channel::<()>(1);
-    let app =
-        build(config, samples, flag_rx, alive).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            info!("shutting down");
-            let _ = flag_tx.send(true);
-        })
-        .await?;
+    let app = build(config, samples, flag_rx.clone(), alive);
+    let mut shutdown = pin!(shutdown);
+    let mut tasks = JoinSet::new();
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut shutdown => break,
+            _ = tasks.join_next(), if !tasks.is_empty() => {},
+            accepted = listener.accept() => {
+                let (socket, peer) = match accepted {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        warn!(%err, "cannot accept connection");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let service = TowerToHyperService::new(app.clone().layer(Extension(ConnectInfo(peer))));
+                let http = http.clone();
+                let mut stop = flag_rx.clone();
+                tasks.spawn(async move {
+                    let mut conn = pin!(http.serve_connection(TokioIo::new(socket), service).with_upgrades());
+                    let result = tokio::select! {
+                        result = conn.as_mut() => result,
+                        _ = stop.changed() => {
+                            conn.as_mut().graceful_shutdown();
+                            conn.await
+                        }
+                    };
+                    if let Err(err) = result {
+                        debug!(%peer, %err, "HTTP connection ended");
+                    }
+                });
+            }
+        }
+    }
+    info!("shutting down");
+    drop(listener);
+    let _ = flag_tx.send(true);
+    drop(app);
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    drop(tasks);
     // Upgraded connections are detached from hyper: wait for their tasks to send Close.
     let _ = tokio::time::timeout(DRAIN_TIMEOUT, alive_rx.recv()).await;
     Ok(())
@@ -113,8 +167,31 @@ async fn ws_upgrade(
     ws: WebSocketUpgrade,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, peer, state))
+    let mut origins = headers.get_all(ORIGIN).iter();
+    if let Some(origin) = origins.next()
+        && (origins.next().is_some()
+            || !state
+                .config
+                .allowed_origins
+                .iter()
+                .any(|allowed| origin.as_bytes() == allowed.as_bytes()))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(permit) = state.permits.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    ws.max_message_size(WS_SIZE_LIMIT)
+        .max_frame_size(WS_SIZE_LIMIT)
+        .read_buffer_size(4096)
+        .write_buffer_size(4096)
+        .max_write_buffer_size(64 * 1024)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            handle_socket(socket, peer, state).await;
+        })
 }
 
 fn now_ms() -> u64 {
@@ -161,6 +238,7 @@ enum Reject {
     InvalidProof,
     ProtocolMismatch,
     Internal,
+    TooLarge,
     Gone,
 }
 
@@ -172,6 +250,7 @@ impl Reject {
             Reject::InvalidProof => "invalid proof",
             Reject::ProtocolMismatch => "protocol mismatch",
             Reject::Internal => "internal",
+            Reject::TooLarge => "message too large",
             Reject::Gone => "disconnected",
         }
     }
@@ -204,7 +283,7 @@ impl Reject {
                 "pairing is unavailable".to_string(),
                 1011,
             ),
-            Reject::Gone => unreachable!("disconnected peer cannot receive a response"),
+            Reject::Gone | Reject::TooLarge => unreachable!("no error frame for this rejection"),
         }
     }
 }
@@ -214,6 +293,7 @@ async fn auth_frame(
 ) -> Result<ClientBody, Reject> {
     let text = loop {
         match rx.next().await {
+            Some(Err(err)) if is_capacity_error(&err) => return Err(Reject::TooLarge),
             None | Some(Err(_) | Ok(Message::Close(_))) => return Err(Reject::Gone),
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
             Some(Ok(Message::Binary(_))) => return Err(Reject::Malformed),
@@ -227,6 +307,14 @@ async fn auth_frame(
     ClientFrame::parse(text.as_str())
         .map(|frame| frame.body)
         .map_err(|_| Reject::Malformed)
+}
+
+fn is_capacity_error(err: &axum::Error) -> bool {
+    matches!(
+        err.source()
+            .and_then(|source| source.downcast_ref::<WsError>()),
+        Some(WsError::Capacity(_))
+    )
 }
 
 async fn handshake(
@@ -299,6 +387,9 @@ async fn handle_socket(socket: WebSocket, peer: SocketAddr, state: AppState) {
     .unwrap_or(Err(Reject::Timeout));
     match verdict {
         Err(Reject::Gone) => {}
+        Err(Reject::TooLarge) => {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, tx.send(close_message(1009, ""))).await;
+        }
         Err(reject) => {
             warn!(%peer, reason = reject.category(), "authentication failed");
             let (code, message, close) = reject.response();

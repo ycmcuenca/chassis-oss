@@ -115,6 +115,8 @@ impl Harness {
             info: Arc::new(info),
             interval_ms,
             auth_timeout,
+            connection_limit: server::CONNECTION_LIMIT,
+            allowed_origins: Vec::new(),
         };
         let (stop, stopped) = oneshot::channel::<()>();
         let server = tokio::spawn(server::serve(listener, config, rx, async move {

@@ -71,9 +71,9 @@ pub struct ServeArgs {
     /// Address to listen on
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:7317")]
     pub bind: SocketAddr,
-    /// Allow binding a non-loopback address
-    #[arg(long)]
-    pub allow_non_loopback: bool,
+    /// Allow this exact browser Origin (repeatable)
+    #[arg(long, value_name = "ORIGIN")]
+    pub allow_origin: Vec<String>,
     /// Sampling interval in milliseconds (minimum 250)
     #[arg(long, value_name = "MS", default_value_t = 1000)]
     pub interval_ms: u32,
@@ -105,9 +105,9 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
             args.interval_ms
         )));
     }
-    if !args.bind.ip().is_loopback() && !args.allow_non_loopback {
+    if !args.bind.ip().is_loopback() {
         return Err(Error::new(format!(
-            "refusing to bind non-loopback address {}; pass --allow-non-loopback to allow it",
+            "refusing to bind {}: the daemon only listens on loopback; for remote access put Tailscale Serve in front of it",
             args.bind
         )));
     }
@@ -122,6 +122,11 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
 
 /// Run the server until Ctrl-C.
 fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
+    #[cfg(unix)]
+    match raise_nofile() {
+        Ok(soft) => tracing::debug!(soft, "open-file soft limit"),
+        Err(err) => tracing::warn!(%err, "cannot raise open-file soft limit"),
+    }
     let host_id = config::host_id(&config_dir)?;
     let interval = Duration::from_millis(u64::from(args.interval_ms));
     let sampler = sampler::spawn(interval, host_id)?;
@@ -141,6 +146,8 @@ fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
             info: Arc::new(sampler.info.clone()),
             interval_ms: args.interval_ms,
             auth_timeout: AUTH_TIMEOUT,
+            connection_limit: server::CONNECTION_LIMIT,
+            allowed_origins: args.allow_origin.clone(),
         };
         let ctrl_c = async {
             if let Err(e) = tokio::signal::ctrl_c().await {
@@ -154,6 +161,46 @@ fn serve(args: &ServeArgs, config_dir: PathBuf) -> Result<(), Error> {
     });
     sampler.stop();
     outcome
+}
+
+#[cfg(unix)]
+fn raise_nofile() -> std::io::Result<libc::rlim_t> {
+    let ceiling = 8192;
+    #[cfg(target_os = "macos")]
+    let ceiling = {
+        let mut max = 0i32;
+        let mut len = std::mem::size_of_val(&max);
+        // SAFETY: the output pointer and length describe a writable integer.
+        if unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                std::ptr::from_mut(&mut max).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        ceiling.min(max as libc::rlim_t)
+    };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: limit is a writable rlimit; retain the kernel's hard limit on write.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let target = limit.rlim_max.min(ceiling);
+    if target > limit.rlim_cur {
+        limit.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(limit.rlim_cur)
 }
 
 fn init_logging(level: LevelFilter) {
@@ -260,7 +307,7 @@ mod tests {
     fn serve_defaults() {
         let args = serve_args(&[]);
         assert_eq!(args.bind, "127.0.0.1:7317".parse().unwrap());
-        assert!(!args.allow_non_loopback);
+        assert!(args.allow_origin.is_empty());
         assert_eq!(args.interval_ms, 1000);
         assert_eq!(args.log_level, LevelFilter::INFO);
     }
@@ -274,11 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn guard_rejects_non_loopback_without_flag() {
+    fn guard_rejects_non_loopback() {
         let dir = tempfile::tempdir().unwrap();
         let args = serve_args(&["--bind", "0.0.0.0:7317"]);
         let err = check_serve(&args, dir.path()).unwrap_err();
-        assert!(err.to_string().contains("--allow-non-loopback"));
+        assert!(err.to_string().contains("Tailscale Serve"));
     }
 
     #[test]
@@ -288,14 +335,6 @@ mod tests {
         let err = check_serve(&args, dir.path()).unwrap_err();
         assert!(err.to_string().contains("chassis-daemon pair"));
         auth::pair(dir.path()).unwrap();
-        check_serve(&args, dir.path()).unwrap();
-    }
-
-    #[test]
-    fn guard_allows_non_loopback_with_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        auth::pair(dir.path()).unwrap();
-        let args = serve_args(&["--bind", "0.0.0.0:7317", "--allow-non-loopback"]);
         check_serve(&args, dir.path()).unwrap();
     }
 }
