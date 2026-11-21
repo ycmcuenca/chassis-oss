@@ -111,7 +111,7 @@ pub fn check_serve(args: &ServeArgs, config_dir: &Path) -> Result<(), Error> {
             args.bind
         )));
     }
-    if !config_dir.join(TOKEN_HASH_FILE).is_file() {
+    if auth::TokenHash::load(config_dir)?.is_none() {
         return Err(Error::new(format!(
             "no pairing token found in {}; run `chassis-daemon pair` first",
             config_dir.display()

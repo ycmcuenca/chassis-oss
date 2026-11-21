@@ -137,10 +137,10 @@ impl Harness {
         ws
     }
 
-    /// Connect and authenticate; reads nothing.
+    /// Connect and authenticate; leaves telemetry unread.
     pub async fn login(&self) -> Ws {
         let mut ws = self.connect().await;
-        send_hello(&mut ws, &self.token, PROTOCOL_MAJOR).await;
+        authenticate(&mut ws, &self.token).await;
         ws
     }
 
@@ -165,16 +165,14 @@ impl Harness {
     }
 }
 
-pub async fn send_hello(ws: &mut Ws, _token: &str, major: u16) {
+pub async fn send_hello(ws: &mut Ws) -> [u8; 32] {
+    let nc = rand::random::<[u8; 32]>();
     let frame = ClientFrame {
         v: PROTOCOL_MAJOR,
         ts_ms: 0,
         body: ClientBody::Hello {
-            protocol_major: major,
-            nonce: base64::Engine::encode(
-                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                rand::random::<[u8; 32]>(),
-            ),
+            protocol_major: PROTOCOL_MAJOR,
+            nonce: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, nc),
             client: ClientIdentity {
                 name: "test".to_string(),
                 version: "0".to_string(),
@@ -184,6 +182,48 @@ pub async fn send_hello(ws: &mut Ws, _token: &str, major: u16) {
     ws.send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
         .await
         .unwrap();
+    nc
+}
+
+pub async fn challenge(ws: &mut Ws) -> ([u8; 32], String) {
+    let frame = next_frame(ws).await;
+    assert_eq!(frame.seq, 1);
+    let ServerBody::AuthChallenge { nonce, proof } = frame.body else {
+        panic!("expected auth.challenge");
+    };
+    (auth::decode(&nonce).unwrap(), proof)
+}
+
+pub async fn send_auth(ws: &mut Ws, key: &auth::TokenHash, nc: &[u8; 32], ns: &[u8; 32]) -> String {
+    let proof = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        key.proof(auth::Role::Client, nc, ns),
+    );
+    let frame = ClientFrame {
+        v: PROTOCOL_MAJOR,
+        ts_ms: 0,
+        body: ClientBody::Auth {
+            proof: proof.clone(),
+        },
+    };
+    ws.send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+        .await
+        .unwrap();
+    proof
+}
+
+pub async fn authenticate(ws: &mut Ws, token: &str) -> (String, String) {
+    let nc = send_hello(ws).await;
+    let (ns, server_proof) = challenge(ws).await;
+    let key = auth::TokenHash::from_token(token);
+    assert!(key.verify(
+        auth::Role::Server,
+        &nc,
+        &ns,
+        &auth::decode(&server_proof).unwrap()
+    ));
+    let client_proof = send_auth(ws, &key, &nc, &ns).await;
+    (server_proof, client_proof)
 }
 
 /// The next server frame; every frame must pass `parse_lenient`.
@@ -210,7 +250,7 @@ pub async fn drain(ws: &mut Ws) -> (Vec<ServerFrame>, Option<u16>) {
     let mut frames = Vec::new();
     let mut code = None;
     loop {
-        match tokio::time::timeout(STEP, ws.next()).await {
+        match tokio::time::timeout(Duration::from_secs(7), ws.next()).await {
             Err(_) => panic!("connection stayed open"),
             Ok(None | Some(Err(_))) => return (frames, code),
             Ok(Some(Ok(Message::Close(frame)))) => code = frame.map(|f| u16::from(f.code)),
@@ -231,7 +271,6 @@ pub fn used_bytes(frame: &ServerFrame) -> u64 {
 
 pub fn assert_only_error(frames: &[ServerFrame], expected: ErrorCode) {
     assert_eq!(frames.len(), 1, "{frames:?}");
-    assert_eq!(frames[0].seq, 1);
     match &frames[0].body {
         ServerBody::Error { code, .. } => assert_eq!(*code, expected),
         other => panic!("expected error, got {other:?}"),

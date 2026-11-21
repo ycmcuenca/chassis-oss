@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chassis_telemetry_protocol::{
@@ -15,6 +15,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+use crate::auth::{self, Role, TokenHash};
 use crate::cli::Error;
 
 const CLIENT_NAME: &str = "chassis-daemon-tail";
@@ -160,7 +161,7 @@ fn emit(out: &mut impl Write, line: &str) -> Result<(), Error> {
 /// `max_frames` stops after that many printed lines; it exists for tests.
 pub async fn run(
     url: &str,
-    _token: &str,
+    token: &str,
     out: &mut (impl Write + Send),
     max_frames: Option<usize>,
 ) -> Result<(), Error> {
@@ -168,12 +169,13 @@ pub async fn run(
         .await
         .map_err(|e| Error::new(format!("cannot connect to {url}: {e}")))?;
 
+    let nc = rand::random::<[u8; 32]>();
     let hello = ClientFrame {
         v: PROTOCOL_MAJOR,
         ts_ms: now_ms(),
         body: ClientBody::Hello {
             protocol_major: PROTOCOL_MAJOR,
-            nonce: URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()),
+            nonce: URL_SAFE_NO_PAD.encode(nc),
             client: ClientIdentity {
                 name: CLIENT_NAME.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -185,6 +187,38 @@ pub async fn run(
     ws.send(Message::Text(text.into()))
         .await
         .map_err(|e| Error::new(format!("cannot send client.hello: {e}")))?;
+
+    let key = TokenHash::from_token(token);
+    let ns = match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            match ServerFrame::parse_lenient(text.as_str())
+                .ok()
+                .map(|f| f.body)
+            {
+                Some(ServerBody::AuthChallenge { nonce, proof }) => auth::decode(&nonce)
+                    .zip(auth::decode(&proof))
+                    .filter(|(ns, proof)| key.verify(Role::Server, &nc, ns, proof))
+                    .map(|(ns, _)| ns),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let Some(ns) = ns else {
+        // Drop the connection without sending even a Close frame to an unproven host.
+        return Err(Error::new("the host could not prove this pairing"));
+    };
+    let auth = ClientFrame {
+        v: PROTOCOL_MAJOR,
+        ts_ms: now_ms(),
+        body: ClientBody::Auth {
+            proof: URL_SAFE_NO_PAD.encode(key.proof(Role::Client, &nc, &ns)),
+        },
+    };
+    let text = serde_json::to_string(&auth).map_err(|_| Error::new("cannot encode client.auth"))?;
+    ws.send(Message::Text(text.into()))
+        .await
+        .map_err(|_| Error::new("cannot send client.auth"))?;
 
     let mut printed = 0usize;
     while let Some(message) = ws.next().await {

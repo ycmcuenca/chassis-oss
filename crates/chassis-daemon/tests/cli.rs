@@ -26,6 +26,15 @@ fn serve_unpaired_exits_1() {
 }
 
 #[test]
+fn serve_with_malformed_pairing_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("token.sha256"), "invalid").unwrap();
+    let out = daemon(dir.path(), &["serve"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("malformed; run `chassis-daemon pair` again"));
+}
+
+#[test]
 fn serve_non_loopback_without_flag_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     let out = daemon(dir.path(), &["serve", "--bind", "0.0.0.0:7317"]);

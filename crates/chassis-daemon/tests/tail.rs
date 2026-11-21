@@ -4,11 +4,15 @@ mod common;
 
 use std::time::Duration;
 
-use chassis_daemon::tail;
+use chassis_daemon::{auth, tail};
+use chassis_telemetry_protocol::{ClientBody, ClientFrame, ServerBody, ServerFrame};
 use common::Harness;
+use futures_util::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn tail_prints_hello_snapshot_and_sample_lines() {
     let h = Harness::start(Duration::from_secs(5)).await;
     h.publish(1 << 20);
@@ -26,17 +30,16 @@ async fn tail_prints_hello_snapshot_and_sample_lines() {
     let text = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text}");
-    assert!(lines[0].starts_with("#1 hello chassis-daemon "), "{text}");
+    assert!(lines[0].starts_with("#2 hello chassis-daemon "), "{text}");
     assert!(
-        lines[1].starts_with("#2 agents.snapshot 0 sessions"),
+        lines[1].starts_with("#3 agents.snapshot 0 sessions"),
         "{text}"
     );
-    assert!(lines[2].starts_with("#3 host.sample cpu 12.5%"), "{text}");
+    assert!(lines[2].starts_with("#4 host.sample cpu 12.5%"), "{text}");
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
-async fn tail_with_wrong_token_fails_with_auth_failed() {
+async fn tail_with_wrong_token_cannot_verify_the_host() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let url = format!("ws://{}/v1/ws", h.addr);
 
@@ -49,12 +52,77 @@ async fn tail_with_wrong_token_fails_with_auth_failed() {
     .expect("tail timed out")
     .expect_err("tail should be refused");
 
-    assert!(err.to_string().contains("auth_failed"), "{err}");
     assert!(
-        String::from_utf8(out)
-            .unwrap()
-            .starts_with("#1 error auth_failed"),
+        err.to_string()
+            .contains("the host could not prove this pairing"),
+        "{err}"
     );
+    assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn tail_sends_only_hello_to_an_unproven_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(socket).await.unwrap();
+        let mut received = vec![ws.next().await.unwrap().unwrap()];
+        let encode = |bytes: [u8; 32]| {
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+        };
+        let challenge = ServerFrame {
+            v: 1,
+            ts_ms: 0,
+            seq: 1,
+            body: ServerBody::AuthChallenge {
+                nonce: encode(rand::random()),
+                proof: encode([0; 32]),
+            },
+        };
+        ws.send(Message::Text(
+            serde_json::to_string(&challenge).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+        while let Some(Ok(message)) = ws.next().await {
+            received.push(message);
+        }
+        received
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::pair(dir.path()).unwrap();
+    let output = tokio::task::spawn_blocking({
+        let token = token.clone();
+        move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_chassis-daemon"))
+                .args(["tail", "--url", &url])
+                .env("CHASSIS_TOKEN", token)
+                .output()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the host could not prove this pairing")
+    );
+    assert!(output.stdout.is_empty());
+    let received = tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+    let [Message::Text(hello)] = received.as_slice() else {
+        panic!("expected only a client.hello");
+    };
+    assert!(matches!(
+        ClientFrame::parse(hello.as_str()).unwrap().body,
+        ClientBody::Hello { .. }
+    ));
+    assert!(!hello.contains(&token));
+    assert!(!hello.contains(&hex::encode(Sha256::digest(token.as_bytes()))));
+    assert!(!hello.contains("proof"));
 }
 
 #[tokio::test]

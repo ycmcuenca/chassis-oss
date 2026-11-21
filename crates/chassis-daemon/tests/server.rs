@@ -14,13 +14,12 @@ use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn valid_client_gets_hello_snapshot_then_samples() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.login().await;
 
     let hello = next_frame(&mut ws).await;
-    assert_eq!(hello.seq, 1);
+    assert_eq!(hello.seq, 2);
     match hello.body {
         ServerBody::Hello(hello) => {
             assert_eq!(hello.protocol.major, PROTOCOL_MAJOR);
@@ -35,7 +34,7 @@ async fn valid_client_gets_hello_snapshot_then_samples() {
         other => panic!("expected hello, got {other:?}"),
     }
     let snapshot = next_frame(&mut ws).await;
-    assert_eq!(snapshot.seq, 2);
+    assert_eq!(snapshot.seq, 3);
     match snapshot.body {
         ServerBody::AgentsSnapshot { sessions } => assert!(sessions.is_empty()),
         other => panic!("expected agents.snapshot, got {other:?}"),
@@ -43,16 +42,15 @@ async fn valid_client_gets_hello_snapshot_then_samples() {
 
     h.publish(7);
     let first = next_frame(&mut ws).await;
-    assert_eq!(first.seq, 3);
+    assert_eq!(first.seq, 4);
     assert_eq!(used_bytes(&first), 7);
     h.publish(8);
     let second = next_frame(&mut ws).await;
-    assert_eq!(second.seq, 4);
+    assert_eq!(second.seq, 5);
     assert_eq!(used_bytes(&second), 8);
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn sample_published_before_connecting_is_sent_right_away() {
     let h = Harness::start(Duration::from_secs(5)).await;
     h.publish(42);
@@ -63,47 +61,79 @@ async fn sample_published_before_connecting_is_sent_right_away() {
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
-async fn wrong_token_gets_auth_failed_and_close_4401() {
+async fn wrong_client_proof_gets_auth_failed_and_close_4401() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
-    send_hello(&mut ws, "not-the-token", PROTOCOL_MAJOR).await;
     h.publish(1);
+    let nc = send_hello(&mut ws).await;
+    let (ns, _) = challenge(&mut ws).await;
+    send_auth(
+        &mut ws,
+        &auth::TokenHash::from_token("not-the-token"),
+        &nc,
+        &ns,
+    )
+    .await;
     let (frames, code) = drain(&mut ws).await;
     assert_only_error(&frames, ErrorCode::AuthFailed);
     assert_eq!(code, Some(4401));
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
-async fn token_is_checked_before_protocol_major() {
+async fn hello_without_auth_uses_the_upgrade_deadline() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
-    send_hello(&mut ws, "not-the-token", 2).await;
+    let started = Instant::now();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    send_hello(&mut ws).await;
+    challenge(&mut ws).await;
     let (frames, code) = drain(&mut ws).await;
     assert_only_error(&frames, ErrorCode::AuthFailed);
     assert_eq!(code, Some(4401));
+    assert!(
+        (Duration::from_millis(4700)..Duration::from_millis(6500)).contains(&started.elapsed())
+    );
 }
 
 #[tokio::test]
 async fn silent_client_is_closed_4401_without_telemetry() {
-    let h = Harness::start(Duration::from_millis(300)).await;
+    let h = Harness::start(Duration::from_secs(5)).await;
     h.publish(1);
     let mut ws = h.connect().await;
     let started = Instant::now();
     let (frames, code) = drain(&mut ws).await;
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(
+        (Duration::from_millis(4700)..Duration::from_millis(6500)).contains(&started.elapsed())
+    );
     assert_only_error(&frames, ErrorCode::AuthFailed);
     assert_eq!(code, Some(4401));
 }
 
 #[tokio::test]
-async fn garbage_first_frame_gets_auth_failed_and_close_4400() {
+async fn malformed_first_frames_get_auth_failed_and_close_4400() {
+    let h = Harness::start(Duration::from_secs(5)).await;
+    for message in [
+        Message::Text("definitely not json".into()),
+        Message::Text("[]".into()),
+        Message::Text(r#"{"v":1,"ts_ms":0,"type":"client.auth","proof":"test"}"#.into()),
+        Message::Binary(vec![0].into()),
+        Message::Text(r#"{"v":1,"ts_ms":0,"type":"client.hello","protocol_major":1,"nonce":"AA","client":{"name":"test","version":"0"}}"#.into()),
+    ] {
+        let mut ws = h.connect().await;
+        ws.send(message).await.unwrap();
+        let (frames, code) = drain(&mut ws).await;
+        assert_only_error(&frames, ErrorCode::AuthFailed);
+        assert_eq!(code, Some(4400));
+    }
+}
+
+#[tokio::test]
+async fn malformed_second_frame_gets_auth_failed_and_close_4400() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
-    ws.send(Message::Text("definitely not json".into()))
-        .await
-        .unwrap();
+    send_hello(&mut ws).await;
+    challenge(&mut ws).await;
+    send_hello(&mut ws).await;
     let (frames, code) = drain(&mut ws).await;
     assert_only_error(&frames, ErrorCode::AuthFailed);
     assert_eq!(code, Some(4400));
@@ -113,26 +143,27 @@ async fn garbage_first_frame_gets_auth_failed_and_close_4400() {
 async fn protocol_mismatch_gets_error_and_close_4426() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.connect().await;
-    send_hello(&mut ws, &h.token, 2).await;
+    ws.send(Message::Text(r#"{"v":2,"ts_ms":0,"type":"client.hello","protocol_major":2,"auth_token":"x","client":{"name":"test","version":"0"}}"#.into())).await.unwrap();
     let (frames, code) = drain(&mut ws).await;
     assert_only_error(&frames, ErrorCode::ProtocolMismatch);
     assert_eq!(code, Some(4426));
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn repairing_takes_effect_without_restart() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let new_token = auth::pair(h.dir.path()).unwrap();
 
     let mut old = h.connect().await;
-    send_hello(&mut old, &h.token, PROTOCOL_MAJOR).await;
+    let nc = send_hello(&mut old).await;
+    let (ns, _) = challenge(&mut old).await;
+    send_auth(&mut old, &auth::TokenHash::from_token(&h.token), &nc, &ns).await;
     let (_, code) = drain(&mut old).await;
     assert_eq!(code, Some(4401));
 
     let mut fresh = h.connect().await;
-    send_hello(&mut fresh, &new_token, PROTOCOL_MAJOR).await;
-    assert_eq!(next_frame(&mut fresh).await.seq, 1);
+    authenticate(&mut fresh, &new_token).await;
+    assert_eq!(next_frame(&mut fresh).await.seq, 2);
 }
 
 #[tokio::test]
@@ -152,48 +183,45 @@ async fn healthz_answers_ok_without_host_data() {
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn two_clients_have_independent_sequences() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut a = h.login().await;
-    assert_eq!(next_frame(&mut a).await.seq, 1);
     assert_eq!(next_frame(&mut a).await.seq, 2);
-    h.publish(1);
     assert_eq!(next_frame(&mut a).await.seq, 3);
+    h.publish(1);
+    assert_eq!(next_frame(&mut a).await.seq, 4);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut b = h.login().await;
     let first = next_frame(&mut b).await;
-    assert_eq!(first.seq, 1);
+    assert_eq!(first.seq, 2);
     assert!(matches!(first.body, ServerBody::Hello(_)));
-    assert_eq!(next_frame(&mut b).await.seq, 2);
-    // `b` connected after sample 1, which it still gets as the latest, then sample 2 for both.
     assert_eq!(next_frame(&mut b).await.seq, 3);
+    // `b` connected after sample 1, which it still gets as the latest, then sample 2 for both.
+    assert_eq!(next_frame(&mut b).await.seq, 4);
     h.publish(2);
     assert_eq!(used_bytes(&next_frame(&mut a).await), 2);
     assert_eq!(used_bytes(&next_frame(&mut b).await), 2);
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn eight_concurrent_clients_all_get_telemetry() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut clients = join_all((0..8).map(|_| h.login())).await;
     // Wait until every client is past hello and snapshot, then publish.
     for ws in &mut clients {
-        assert_eq!(next_frame(ws).await.seq, 1);
         assert_eq!(next_frame(ws).await.seq, 2);
+        assert_eq!(next_frame(ws).await.seq, 3);
     }
     h.publish(5);
     for ws in &mut clients {
         let frame = next_frame(ws).await;
-        assert_eq!(frame.seq, 3);
+        assert_eq!(frame.seq, 4);
         assert_eq!(used_bytes(&frame), 5);
     }
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn stalled_client_does_not_delay_another() {
     let h = Harness::start(Duration::from_secs(5)).await;
     let mut stalled = h.login().await;
@@ -228,7 +256,6 @@ async fn stalled_client_does_not_delay_another() {
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn real_sampler_frames_all_parse_leniently() {
     let dir = tempfile::tempdir().unwrap();
     let token = auth::pair(dir.path()).unwrap();
@@ -272,7 +299,6 @@ async fn real_sampler_frames_all_parse_leniently() {
 }
 
 #[tokio::test]
-#[ignore = "handshake lands in 5.2"]
 async fn shutdown_closes_clients_with_1001_and_serve_returns() {
     let mut h = Harness::start(Duration::from_secs(5)).await;
     let mut ws = h.login().await;

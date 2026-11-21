@@ -4,10 +4,10 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use crate::cli::Error;
 use crate::config;
@@ -16,8 +16,7 @@ use crate::config;
 pub const TOKEN_HASH_FILE: &str = "token.sha256";
 
 /// The stored hash of the current pairing token.
-#[derive(Debug, Clone)]
-pub struct TokenHash(String);
+pub struct TokenHash([u8; 32]);
 
 impl TokenHash {
     /// Load `<dir>/token.sha256`. `None` when the file is missing; error when malformed.
@@ -26,7 +25,13 @@ impl TokenHash {
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::new(format!("cannot read {}: {e}", path.display()))),
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "cannot read {}: {}",
+                    path.display(),
+                    e.kind()
+                )));
+            }
         };
         let hash = raw.trim();
         let well_formed = hash.len() == 64
@@ -39,18 +44,43 @@ impl TokenHash {
                 path.display()
             )));
         }
-        Ok(Some(TokenHash(hash.to_owned())))
+        let mut key = [0; 32];
+        hex::decode_to_slice(hash, &mut key).expect("validated lowercase hex");
+        Ok(Some(TokenHash(key)))
     }
 
-    /// Constant-time check of a candidate token against the stored hash.
-    pub fn verify(&self, token: &str) -> bool {
-        let candidate = hash_token(token);
-        self.0.as_bytes().ct_eq(candidate.as_bytes()).into()
+    pub fn from_token(token: &str) -> Self {
+        Self(Sha256::digest(token.as_bytes()).into())
+    }
+
+    fn mac(&self, role: Role, nc: &[u8; 32], ns: &[u8; 32]) -> Hmac<Sha256> {
+        let mut mac = Hmac::new_from_slice(&self.0).expect("HMAC accepts 32-byte keys");
+        mac.update(match role {
+            Role::Server => b"chassis/v1/server\0",
+            Role::Client => b"chassis/v1/client\0",
+        });
+        mac.update(nc);
+        mac.update(ns);
+        mac
+    }
+
+    pub fn proof(&self, role: Role, nc: &[u8; 32], ns: &[u8; 32]) -> [u8; 32] {
+        self.mac(role, nc, ns).finalize().into_bytes().into()
+    }
+
+    pub fn verify(&self, role: Role, nc: &[u8; 32], ns: &[u8; 32], tag: &[u8; 32]) -> bool {
+        self.mac(role, nc, ns).verify_slice(tag).is_ok()
     }
 }
 
-fn hash_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+pub enum Role {
+    Server,
+    Client,
+}
+
+pub fn decode(encoded: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0; 32];
+    (URL_SAFE_NO_PAD.decode_slice(encoded, &mut bytes).ok()? == bytes.len()).then_some(bytes)
 }
 
 /// Issue a new pairing token, replacing (and so invalidating) any previous one.
@@ -61,7 +91,7 @@ pub fn pair(dir: &Path) -> Result<String, Error> {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let contents = format!("{}\n", hash_token(&token));
+    let contents = format!("{}\n", hex::encode(TokenHash::from_token(&token).0));
 
     let target = dir.join(TOKEN_HASH_FILE);
     let tmp = dir.join(format!("{TOKEN_HASH_FILE}.tmp"));
@@ -110,12 +140,32 @@ mod tests {
     fn repairing_invalidates_the_previous_token() {
         let dir = tempfile::tempdir().unwrap();
         let first = pair(dir.path()).unwrap();
-        assert!(TokenHash::load(dir.path()).unwrap().unwrap().verify(&first));
+        assert!(TokenHash::load(dir.path()).unwrap().unwrap().0 == TokenHash::from_token(&first).0);
 
         let second = pair(dir.path()).unwrap();
         let hash = TokenHash::load(dir.path()).unwrap().unwrap();
-        assert!(!hash.verify(&first));
-        assert!(hash.verify(&second));
+        assert!(hash.0 != TokenHash::from_token(&first).0);
+        assert!(hash.0 == TokenHash::from_token(&second).0);
+    }
+
+    #[test]
+    fn handshake_known_answer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/fixtures/handshake/known-answer.json"
+        )))
+        .unwrap();
+        let field = |name: &str| fixture[name].as_str().unwrap();
+        let key = TokenHash::from_token(field("token"));
+        let nc = decode(field("nc")).unwrap();
+        let ns = decode(field("ns")).unwrap();
+        for (role, name) in [(Role::Server, "proof_s"), (Role::Client, "proof_c")] {
+            assert!(URL_SAFE_NO_PAD.encode(key.proof(role, &nc, &ns)) == field(name));
+        }
+        let bytes = |name| decode(field(name)).unwrap();
+        assert!(key.verify(Role::Server, &nc, &ns, &bytes("proof_s")));
+        assert!(key.verify(Role::Client, &nc, &ns, &bytes("proof_c")));
+        assert!(!key.verify(Role::Client, &nc, &ns, &bytes("proof_s")));
     }
 
     #[test]
