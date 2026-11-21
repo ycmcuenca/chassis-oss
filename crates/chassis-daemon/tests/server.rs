@@ -197,6 +197,10 @@ const PING: Duration = Duration::from_millis(80);
 const IDLE: Duration = Duration::from_millis(360);
 
 async fn liveness_harness(interval_ms: u32) -> Harness {
+    liveness_harness_with_ping(interval_ms, PING).await
+}
+
+async fn liveness_harness_with_ping(interval_ms: u32, ping_interval: Duration) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let token = auth::pair(dir.path()).unwrap();
     let (tx, rx) = watch::channel(None);
@@ -209,7 +213,7 @@ async fn liveness_harness(interval_ms: u32) -> Harness {
         interval_ms,
         STEP,
         |config| {
-            config.ping_interval = PING;
+            config.ping_interval = ping_interval;
             config.idle_timeout = IDLE;
         },
     )
@@ -268,14 +272,18 @@ async fn short_socket_pause_replays_buffered_frames_in_order_and_with_original_t
 
 #[tokio::test]
 async fn socket_paused_past_idle_window_gets_4408() {
-    let h = liveness_harness(50).await;
+    // This tests the idle close, not Pongs. Keep Pings out of the paused socket's
+    // buffer: on resume Tungstenite may try to write a Pong to the closed peer
+    // before it reads the buffered close frame.
+    let h = liveness_harness_with_ping(50, STEP).await;
     let mut ws = h.login().await;
     next_frame(&mut ws).await;
     next_frame(&mut ws).await;
     h.publish(1);
-    tokio::time::sleep(IDLE + PING).await;
+    tokio::time::sleep(IDLE * 2).await;
     let (frames, code) = drain(&mut ws).await;
     assert_eq!(frames.len(), 1);
+    assert_eq!(used_bytes(&frames[0]), 1);
     assert_eq!(code, Some(4408));
 }
 
